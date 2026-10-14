@@ -133,8 +133,12 @@ class RobotView:
 
     def __init__(self, commander):
         self.c = commander
-        self.scene = ui.scene(grid=False, background_color="#e9eef3").classes("w-full h-full")
-        ui.timer(0.5, self.reset_camera, once=True)  # the camera can only be moved once the scene is live
+        self.scene = ui.scene(grid=False, background_color="#e9eef3").classes(
+            "w-full h-full"
+        )
+        ui.timer(
+            0.5, self.reset_camera, once=True
+        )  # the camera can only be moved once the scene is live
         self.model = None
         self.visual_objects = []  # (object, link, 4x4 visual origin, is_cylinder)
         self.rings = {}  # joint -> (group, [parts], label)
@@ -152,10 +156,16 @@ class RobotView:
     def _floor(self):
         """Solid floor slab (visible from above and below) with a 10 cm grid on top."""
         half, t = self.FLOOR_SIZE / 2, self.FLOOR_THICKNESS
-        self.scene.box(self.FLOOR_SIZE, self.FLOOR_SIZE, t).material("#f4f6f8").move(0, 0, -t / 2 - 0.001)
+        self.scene.box(self.FLOOR_SIZE, self.FLOOR_SIZE, t).material("#f4f6f8").move(
+            0, 0, -t / 2 - 0.001
+        )
         for k in range(-8, 9):
-            self.scene.line([k / 10, -half, 0.0005], [k / 10, half, 0.0005]).material("#c4ccd4")
-            self.scene.line([-half, k / 10, 0.0005], [half, k / 10, 0.0005]).material("#c4ccd4")
+            self.scene.line([k / 10, -half, 0.0005], [k / 10, half, 0.0005]).material(
+                "#c4ccd4"
+            )
+            self.scene.line([-half, k / 10, 0.0005], [half, k / 10, 0.0005]).material(
+                "#c4ccd4"
+            )
 
     def _ring_group(self, label=None):
         """A 3D ring (tube arc + cone head) in the XY plane of a group, arrow head pointing to positive rotation."""
@@ -163,13 +173,19 @@ class RobotView:
         step = self.RING_LENGTH / segments
         parts = []
         with self.scene.group() as group:
-            for k in range(segments):  # each 45 deg piece as a quadratic Bezier tube (control point on the bisector)
+            for k in range(
+                segments
+            ):  # each 45 deg piece as a quadratic Bezier tube (control point on the bisector)
                 a0, a1 = k * step, (k + 1) * step
                 rm = r / math.cos(step / 2)
                 parts.append(
                     self.scene.quadratic_bezier_tube(
                         [r * math.cos(a0), r * math.sin(a0), 0.0],
-                        [rm * math.cos((a0 + a1) / 2), rm * math.sin((a0 + a1) / 2), 0.0],
+                        [
+                            rm * math.cos((a0 + a1) / 2),
+                            rm * math.sin((a0 + a1) / 2),
+                            0.0,
+                        ],
                         [r * math.cos(a1), r * math.sin(a1), 0.0],
                         tubular_segments=12,
                         radius=self.RING_TUBE,
@@ -178,9 +194,13 @@ class RobotView:
                 )
             end = self.RING_LENGTH
             tangent = np.array([-math.sin(end), math.cos(end), 0.0])
-            tip = np.array([r * math.cos(end), r * math.sin(end), 0.0]) + tangent * 0.024
+            tip = (
+                np.array([r * math.cos(end), r * math.sin(end), 0.0]) + tangent * 0.024
+            )
             parts.append(
-                self.scene.cylinder(0, 0.022, 0.048, 16).move(*map(float, tip)).rotate_R(_align(tangent, 1).tolist())
+                self.scene.cylinder(0, 0.022, 0.048, 16)
+                .move(*map(float, tip))
+                .rotate_R(_align(tangent, 1).tolist())
             )
             if label is not None:
                 self.scene.text(
@@ -204,7 +224,15 @@ class RobotView:
         return bool(pending)
 
     def reset_camera(self):
-        self.scene.move_camera(x=1.0, y=-0.85, z=0.8, look_at_x=0.2, look_at_y=0, look_at_z=0.38, duration=0)
+        self.scene.move_camera(
+            x=1.0,
+            y=-0.85,
+            z=0.8,
+            look_at_x=0.2,
+            look_at_y=0,
+            look_at_z=0.38,
+            duration=0,
+        )
 
     # ------------------------------------------------------------------ #
 
@@ -219,14 +247,20 @@ class RobotView:
                             continue
                         obj = self.scene.gltf(url).scale(*v.scale)
                     elif v.kind == "box":
-                        obj = self.scene.box(*v.size).material(v.color or "#c8ced5", v.opacity)
-                    elif v.kind == "cylinder":
-                        obj = self.scene.cylinder(v.size[0], v.size[0], v.size[1], 24).material(
+                        obj = self.scene.box(*v.size).material(
                             v.color or "#c8ced5", v.opacity
                         )
+                    elif v.kind == "cylinder":
+                        obj = self.scene.cylinder(
+                            v.size[0], v.size[0], v.size[1], 24
+                        ).material(v.color or "#c8ced5", v.opacity)
                     else:
-                        obj = self.scene.sphere(v.size[0]).material(v.color or "#c8ced5", v.opacity)
-                    self.visual_objects.append((obj, link, v.origin, v.kind == "cylinder"))
+                        obj = self.scene.sphere(v.size[0]).material(
+                            v.color or "#c8ced5", v.opacity
+                        )
+                    self.visual_objects.append(
+                        (obj, link, v.origin, v.kind == "cylinder")
+                    )
             for name, joint in model.joints.items():
                 if joint.type in ("revolute", "continuous") and joint.mimic is None:
                     self.rings[name] = self._ring_group(self._label(name))
@@ -243,7 +277,18 @@ class RobotView:
             group.delete()
         self.visual_objects, self.rings, self._sent = [], {}, {}
 
-    def _send(self, obj, key, *, pos=None, R=None, scale=None, color=None, opacity=1.0, visible=None):
+    def _send(
+        self,
+        obj,
+        key,
+        *,
+        pos=None,
+        R=None,
+        scale=None,
+        color=None,
+        opacity=1.0,
+        visible=None,
+    ):
         """Only push changes to the browser."""
         state = (
             None if pos is None else tuple(np.round(pos, 4)),
@@ -269,12 +314,20 @@ class RobotView:
         if color is not None:
             obj.material(color, opacity)
 
-    _FLIP = np.diag([1.0, -1.0, -1.0])  # 180 deg about x: the arc runs the other way round, the head turns around
+    _FLIP = np.diag(
+        [1.0, -1.0, -1.0]
+    )  # 180 deg about x: the arc runs the other way round, the head turns around
 
     def _place_ring(self, group, parts, key, center, axis, color, opacity=1.0, sign=1):
         """Ring group around `axis` at `center`; the arrow head shows the direction of rotation (`sign`)."""
         Rz = _align(axis, 2)
-        self._send(group, key + "g", pos=center, R=Rz if sign > 0 else Rz @ self._FLIP, visible=True)
+        self._send(
+            group,
+            key + "g",
+            pos=center,
+            R=Rz if sign > 0 else Rz @ self._FLIP,
+            visible=True,
+        )
         if self._sent.get(key + "c") != (color, opacity):
             self._sent[key + "c"] = (color, opacity)
             for part in parts:
@@ -313,9 +366,19 @@ class RobotView:
             center, axis = joints[name]
             v = jog.get(name, 0.0)
             if abs(v) > 1e-9:
-                self._place_ring(group, parts, name, center, axis, POSITIVE if v > 0 else NEGATIVE, sign=v)
+                self._place_ring(
+                    group,
+                    parts,
+                    name,
+                    center,
+                    axis,
+                    POSITIVE if v > 0 else NEGATIVE,
+                    sign=v,
+                )
             else:
-                self._place_ring(group, parts, name, center, axis, IDLE_RING, opacity=0.55)
+                self._place_ring(
+                    group, parts, name, center, axis, IDLE_RING, opacity=0.55
+                )
 
         # cartesian mode: arrow for the translation, ring for the rotation at the tool
         tool = links.get(self.c.tool_frame)
@@ -333,13 +396,30 @@ class RobotView:
             tcp = tool[:3, 3]
             if np.linalg.norm(lin_w) > 1e-9:
                 d = lin_w / np.linalg.norm(lin_w)
-                length = 0.1 + 0.2 * min(1.0, np.linalg.norm(lin_w) / max(self.c.max_linear * self.c.speed, 1e-9))
-                self._send(self.arrow, "arrow", pos=tcp + d * length / 2, R=_align(d, 1), scale=(1, length, 1),
-                           visible=True)
-                self._send(self.arrow_head, "arrow_head", pos=tcp + d * (length + 0.03), R=_align(d, 1), visible=True)
+                length = 0.1 + 0.2 * min(
+                    1.0,
+                    np.linalg.norm(lin_w) / max(self.c.max_linear * self.c.speed, 1e-9),
+                )
+                self._send(
+                    self.arrow,
+                    "arrow",
+                    pos=tcp + d * length / 2,
+                    R=_align(d, 1),
+                    scale=(1, length, 1),
+                    visible=True,
+                )
+                self._send(
+                    self.arrow_head,
+                    "arrow_head",
+                    pos=tcp + d * (length + 0.03),
+                    R=_align(d, 1),
+                    visible=True,
+                )
                 arrow_shown = True
             if np.linalg.norm(ang_w) > 1e-9:
-                self._place_ring(self.tcp_ring, self.tcp_ring_parts, "tcp", tcp, ang_w, POSITIVE)
+                self._place_ring(
+                    self.tcp_ring, self.tcp_ring_parts, "tcp", tcp, ang_w, POSITIVE
+                )
                 ring_shown = True
         if not arrow_shown:
             self._send(self.arrow, "arrow", visible=False)
@@ -452,9 +532,7 @@ def build_page(commander):
                         ).classes("sd-hint")
                     rows = ui.element("div").classes("sd-jrows")
                     with ui.element("div").classes("sd-overlay") as joint_overlay:
-                        ui.label("Tap to jog in JOINT mode").classes(
-                            "sd-overlay-btn"
-                        )
+                        ui.label("Tap to jog in JOINT mode").classes("sd-overlay-btn")
                     joint_overlay.on("click", lambda: set_mode(JOINT))
 
             # ---------------- bottom bar ----------------
@@ -477,7 +555,7 @@ def build_page(commander):
                         c.set_speed(e.value / 100),
                         speed_value.set_text(f"{e.value} %"),
                     ),
-                ).props("thumb-size=40px track-size=12px").classes("flex-1")
+                ).props("thumb-size=40px track-size=12px track-color=grey-4").classes("flex-1")
                 ui.button("STOP", on_click=c.stop, color="red-8").classes(
                     "sd-stop"
                 ).props("unelevated").tooltip(
@@ -572,12 +650,10 @@ def build_page(commander):
                     mark.style(f"left: {100 * min(max(frac, 0.0), 1.0):.1f}%")
             age = c.joint_states_age()
             servo_label.set_text(c.servo_status)
-            if not c.robot_active:
-                servo_label.set_text(f"ROBOT NOT ACTIVE ({c.robot_mode}): commands are discarded  |  {c.servo_status}")
-            servo_label.classes(add="sd-alert" if not c.robot_active else None,
-                                remove="sd-alert" if c.robot_active else None)
             if c.joint_states_warning:
-                servo_label.set_text(f"{c.servo_status}  |  WARNING: {c.joint_states_warning}")
+                servo_label.set_text(
+                    f"{c.servo_status}  |  WARNING: {c.joint_states_warning}"
+                )
             state_label.set_text(
                 (
                     "joint states: none"
