@@ -50,7 +50,6 @@ class ServoCommander(Node):
         p("joint_states_topic", "/joint_states")
         p("robot_description_topic", "/robot_description")
         p("switch_command_type_service", "/servo_node/switch_command_type")
-        p("robot_mode_topic", "/panda_driver/robot_mode")  # published by panda_driver, e.g. kUserStopped
         p("base_frame", "panda_link0")
         p("tool_frame", "panda_link8")
         p("max_linear_speed", 0.1)  # [m/s] at full deflection and 100 % speed
@@ -95,7 +94,6 @@ class ServoCommander(Node):
         self.model_status = "Waiting for /robot_description ..."
         self._joint_states_topic = val("joint_states_topic")
         self.joint_states_warning = ""
-        self.robot_mode = None  # unknown until the driver reports it
         self._joint_stamps = {}  # joint -> newest joint_states stamp [s], to drop stale / out-of-order messages
 
         self.servo_status = "waiting for servo_node"
@@ -114,7 +112,6 @@ class ServoCommander(Node):
         self.create_subscription(
             String, val("robot_description_topic"), self._on_robot_description, latched
         )
-        self.create_subscription(String, val("robot_mode_topic"), self._on_robot_mode, latched)
         self._switch_client = self.create_client(
             ServoCommandType, val("switch_command_type_service")
         )
@@ -154,19 +151,9 @@ class ServoCommander(Node):
         """Release every input and ask the driver to stop the current motion."""
         self.release_all()
 
-    @property
-    def robot_active(self):
-        """False while the robot cannot move (e.g. enabling switch released). Unknown counts as active."""
-        return self.robot_mode in (None, "kIdle", "kMove")
-
-    def _on_robot_mode(self, msg):
-        self.robot_mode = msg.data or None
-
     def active_inputs(self):
-        """Inputs that are currently held, without expired ones. Nothing while the robot is not active: those commands
-        are discarded, so MoveIt Servo never builds up a target the robot would jump to once it is active again."""
-        if not self.robot_active:
-            return {}
+        """Inputs that are currently held, without expired ones."""
+
         now = time.monotonic()
         with self._lock:
             return {
