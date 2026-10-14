@@ -20,6 +20,7 @@ html, body {{ overflow: hidden; background: #e6eaee; }}
             color: #24292f; font-family: system-ui, sans-serif; user-select: none; }}
 .sd-top {{ display: flex; align-items: center; gap: 18px; padding: 0 12px; background: #fff;
            border-bottom: 1px solid #d0d7de; }}
+.sd-alert {{ color: {NEGATIVE} !important; font-weight: 800; }}
 .sd-brand {{ font-weight: 800; letter-spacing: .12em; font-size: 15px; }}
 .sd-status {{ font: 12px ui-monospace, monospace; color: #57606a; white-space: nowrap; overflow: hidden;
               text-overflow: ellipsis; }}
@@ -571,6 +572,10 @@ def build_page(commander):
                     mark.style(f"left: {100 * min(max(frac, 0.0), 1.0):.1f}%")
             age = c.joint_states_age()
             servo_label.set_text(c.servo_status)
+            if not c.robot_active:
+                servo_label.set_text(f"ROBOT NOT ACTIVE ({c.robot_mode}): commands are discarded  |  {c.servo_status}")
+            servo_label.classes(add="sd-alert" if not c.robot_active else None,
+                                remove="sd-alert" if c.robot_active else None)
             if c.joint_states_warning:
                 servo_label.set_text(f"{c.servo_status}  |  WARNING: {c.joint_states_warning}")
             state_label.set_text(

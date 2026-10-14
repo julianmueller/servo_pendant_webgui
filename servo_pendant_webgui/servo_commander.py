@@ -50,7 +50,7 @@ class ServoCommander(Node):
         p("joint_states_topic", "/joint_states")
         p("robot_description_topic", "/robot_description")
         p("switch_command_type_service", "/servo_node/switch_command_type")
-        p("stop_service", "/panda_driver/stop")
+        p("robot_mode_topic", "/panda_driver/robot_mode")  # published by panda_driver, e.g. kUserStopped
         p("base_frame", "panda_link0")
         p("tool_frame", "panda_link8")
         p("max_linear_speed", 0.1)  # [m/s] at full deflection and 100 % speed
@@ -95,6 +95,7 @@ class ServoCommander(Node):
         self.model_status = "Waiting for /robot_description ..."
         self._joint_states_topic = val("joint_states_topic")
         self.joint_states_warning = ""
+        self.robot_mode = None  # unknown until the driver reports it
         self._joint_stamps = {}  # joint -> newest joint_states stamp [s], to drop stale / out-of-order messages
 
         self.servo_status = "waiting for servo_node"
@@ -113,11 +114,10 @@ class ServoCommander(Node):
         self.create_subscription(
             String, val("robot_description_topic"), self._on_robot_description, latched
         )
+        self.create_subscription(String, val("robot_mode_topic"), self._on_robot_mode, latched)
         self._switch_client = self.create_client(
             ServoCommandType, val("switch_command_type_service")
         )
-        self._stop_client = self.create_client(Trigger, val("stop_service"))
-
         self.create_timer(1.0 / val("publish_rate"), self._publish)
         self.create_timer(1.0, self._watch_servo)
         self.create_timer(2.0, self._check_joint_states_publishers)
@@ -153,14 +153,20 @@ class ServoCommander(Node):
     def stop(self):
         """Release every input and ask the driver to stop the current motion."""
         self.release_all()
-        if self._stop_client.service_is_ready():
-            self._stop_client.call_async(Trigger.Request())
-            self.last_command = "STOP sent"
-        else:
-            self.last_command = "inputs released (stop service not available)"
+
+    @property
+    def robot_active(self):
+        """False while the robot cannot move (e.g. enabling switch released). Unknown counts as active."""
+        return self.robot_mode in (None, "kIdle", "kMove")
+
+    def _on_robot_mode(self, msg):
+        self.robot_mode = msg.data or None
 
     def active_inputs(self):
-        """Inputs that are currently held, without expired ones."""
+        """Inputs that are currently held, without expired ones. Nothing while the robot is not active: those commands
+        are discarded, so MoveIt Servo never builds up a target the robot would jump to once it is active again."""
+        if not self.robot_active:
+            return {}
         now = time.monotonic()
         with self._lock:
             return {
@@ -228,7 +234,9 @@ class ServoCommander(Node):
             msg = JointJog()
             msg.header.stamp = stamp
             # always the full joint vector: a joint released a moment ago is commanded 0 explicitly
-            names = list(self.joint_names) + [n for n in velocities if n not in self.joint_names]
+            names = list(self.joint_names) + [
+                n for n in velocities if n not in self.joint_names
+            ]
             msg.joint_names = names
             msg.velocities = [float(velocities.get(n, 0.0)) for n in names]
             self._jog_pub.publish(msg)
@@ -333,9 +341,16 @@ class ServoCommander(Node):
 
     def _check_joint_states_publishers(self):
         """More than one publisher on the joint states topic usually means cross-talk (e.g. another robot)."""
-        nodes = sorted({info.node_name for info in self.get_publishers_info_by_topic(self._joint_states_topic)})
+        nodes = sorted(
+            {
+                info.node_name
+                for info in self.get_publishers_info_by_topic(self._joint_states_topic)
+            }
+        )
         self.joint_states_warning = (
-            f"{len(nodes)} publishers on {self._joint_states_topic}: {', '.join(nodes)}" if len(nodes) > 1 else ""
+            f"{len(nodes)} publishers on {self._joint_states_topic}: {', '.join(nodes)}"
+            if len(nodes) > 1
+            else ""
         )
 
     def joint_states_age(self):

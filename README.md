@@ -1,19 +1,37 @@
-# servo_pendant_webgui
+# Servo Pendant Webgui
 
 Touch-friendly webgui for MoveIt Servo, laid out like a robot teach pendant, made with [NiceGUI](https://nicegui.io)
+
+![Screenshot of the ui](docs/screenshot.png)
 
 (PolyScope-style): tool jogging left, robot centre, joints right, mode and speed at the bottom. Publishes joint jog
 (`control_msgs/JointJog`) and twist (`geometry_msgs/TwistStamped`) commands. One screen, no scrolling, works with
 mouse, touch and keyboard.
 
+## Install
+
 ```bash
-pip install nicegui trimesh pycollada          # into the venv
-python -m colcon build --symlink-install --packages-select servo_pendant_webgui
-ros2 run servo_pendant_webgui servo_pendant_webgui
-# then open http://<this-pc>:8080 on any browser / tablet
+python3 -m venv .venv --system-site-packages
+source .venv/bin/activate
+pip install nicegui trimesh pycollada
+colcon build --symlink-install servo_pendant_webgui
 ```
 
-Start it next to `ros2 launch panda_moveit_config moveit.launch.py launch_servo:=true`.
+## Run
+
+```bash
+export PYTHONPATH=$(pwd)/.venv/lib/python3.12/site-packages:$PYTHONPATH 
+source .venv/bin/activate
+source install/setup.bash
+```
+
+And run the node.
+
+```bash
+ros2 run servo_pendant_webgui servo_pendant_webgui
+```
+
+Start it next to `ros2 launch *_moveit_config moveit.launch.py launch_servo:=true`. Then open http://localhost:8080 on any browser / tablet. 
 
 ## Panel
 
@@ -21,7 +39,7 @@ Start it next to `ros2 launch panda_moveit_config moveit.launch.py launch_servo:
   - **CARTESIAN / JOINT** switches the active side and Servo's command type (`/servo_node/switch_command_type`).
     Tapping the dimmed side does the same. Servo is switched again automatically whenever it (re)appears.
   - **SPEED** scales every command (default 30 %).
-  - **STOP** releases all inputs and calls `/panda_driver/stop`. This is a software stop, not an emergency stop.
+  - **STOP** releases all inputs. This is a software stop, not an emergency stop.
 - **Joints (right)**: one row per joint from `/joint_states` (finger joints excluded).
   - The current angle, and its position between the joint's min / max limits from the URDF.
   - A spring-return velocity slider. Touch anywhere on it and drag: the drag distance is the velocity, so touching
@@ -65,6 +83,6 @@ explicitly. After a release, three zero commands are sent, then the stream stops
 | `base_frame`, `tool_frame` | `panda_link0`, `panda_link8` |
 | `twist_topic`, `joint_jog_topic` | `/servo_node/delta_twist_cmds`, `/servo_node/delta_joint_cmds` |
 | `joint_states_topic`, `robot_description_topic` | `/joint_states`, `/robot_description` |
-| `switch_command_type_service`, `stop_service` | `/servo_node/switch_command_type`, `/panda_driver/stop` |
+| `switch_command_type_service` | `/servo_node/switch_command_type` |
 | `publish_rate` [Hz], `input_timeout` [s] | `50`, `0.3` |
 | `exclude_joints` (regexes) | `['.*finger.*']` |
