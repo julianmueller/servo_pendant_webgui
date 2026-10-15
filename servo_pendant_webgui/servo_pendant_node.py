@@ -31,9 +31,7 @@ def main():
     threading.Thread(target=spin, name="ros_spin", daemon=True).start()
 
     MESH_CACHE.mkdir(parents=True, exist_ok=True)
-    app.add_static_files(
-        MESH_URL, MESH_CACHE
-    )  # URDF meshes converted to glTF for the 3D view
+    app.add_static_files(MESH_URL, MESH_CACHE)  # URDF meshes converted to glTF for the 3D view
     build_page(commander)
     # A closed or lost browser tab must never leave the robot moving
     app.on_disconnect(commander.release_all)
@@ -45,19 +43,22 @@ def main():
         rclpy.try_shutdown()
 
     app.on_shutdown(shutdown)
-    commander.get_logger().info(
-        f"Servo pendant on http://{commander.host}:{commander.port}"
-    )
-    ui.run(
-        host=commander.host,
-        port=commander.port,
-        title="Servo Pendant",
-        dark=True,
-        reload=False,
-        show=False,
-        favicon="🕹️",
-        uvicorn_logging_level="warning",
-    )
+
+    try:
+        ui.run(
+            host=commander.host,
+            port=commander.port,
+            title="Servo Pendant",
+            dark=False,  # each page applies the theme stored in its browser
+            reload=False,
+            show=False,
+            favicon="🕹️",
+            uvicorn_logging_level="warning",
+        )
+    except KeyboardInterrupt:
+        # Ctrl-C: the server has already shut down (and ROS with it), asyncio only re-raises the signal
+        pass
+    print("Server stopped")
 
 
 if __name__ == "__main__":

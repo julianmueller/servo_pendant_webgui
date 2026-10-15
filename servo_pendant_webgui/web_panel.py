@@ -1,80 +1,138 @@
-"""NiceGUI teach-pendant page for MoveIt Servo (light theme, single screen, no scrolling)."""
+"""NiceGUI teach-pendant page for MoveIt Servo (light / dark theme, single screen, no scrolling)."""
 
 import math
+from urllib.parse import quote
 
 import numpy as np
+from fastapi import Request
 from nicegui import ui
 
 from servo_pendant_webgui.components import JogPad, JogSlider, KeyJog
 from servo_pendant_webgui.mesh_cache import glb_url
 from servo_pendant_webgui.servo_commander import AXIS_NAMES, JOINT, PLANES, TWIST
+from servo_pendant_webgui.settings_panel import SCALE_MAX, SCALE_MIN, SettingsPanel
 
 POSITIVE = "#1f6feb"  # blue: moving in positive direction
 NEGATIVE = "#e8590c"  # orange: moving in negative direction
 IDLE_RING = "#8c959f"
 
+# 3D view per theme (False: light, True: dark): background, floor, floor grid
+VIEW_COLORS = {
+    False: ("#e9eef3", "#f4f6f8", "#c4ccd4"),
+    True: ("#1c2128", "#262c36", "#3d444d"),
+}
+
+# Interface settings are kept per browser in cookies, so the page is rendered right away in the stored theme / scale
+THEME_COOKIE, SCALE_COOKIE = "sd_dark", "sd_scale"
+
 CSS = f"""
-html, body {{ overflow: hidden; background: #e6eaee; }}
+:root {{ --sd-bg: #e6eaee; --sd-surface: #fff; --sd-border: #d0d7de; --sd-text: #24292f; --sd-muted: #57606a;
+         --sd-subtle: #eaeef2; --sd-soft: #f6f8fa; --sd-neutral: #8c959f; --sd-keycap: #c4ccd4; --sd-view: #e9eef3;
+         --sd-veil: #ffffffb0; --sd-limit: #ffd8c2; --sd-thumb: #fff; --sd-label-bg: #ffffffd0;
+         --sd-toggle-bg: #eeeeee; --sd-toggle-text: #212121; }}
+body.body--dark {{ --sd-bg: #0d1117; --sd-surface: #161b22; --sd-border: #30363d; --sd-text: #e6edf3;
+                   --sd-muted: #8b949e; --sd-subtle: #21262d; --sd-soft: #0d1117; --sd-neutral: #6e7681;
+                   --sd-keycap: #484f58; --sd-view: #1c2128; --sd-veil: #0d1117b8; --sd-limit: #6b3417;
+                   --sd-thumb: #2d333b; --sd-label-bg: #161b22d0; --sd-toggle-bg: #21262d; --sd-toggle-text: #c9d1d9; }}
+html, body {{ overflow: hidden; }}
+body {{ background: var(--sd-bg); }}
 .nicegui-content {{ padding: 0 !important; }}
-.sd-root {{ position: fixed; inset: 0; display: grid; grid-template-rows: 40px minmax(0, 1fr) 84px;
-            color: #24292f; font-family: system-ui, sans-serif; user-select: none; }}
-.sd-top {{ display: flex; align-items: center; gap: 18px; padding: 0 12px; background: #fff;
-           border-bottom: 1px solid #d0d7de; }}
+/* --sd-scale (UI scale) is set on the element; scaled with a transform, so pointer maths stay consistent */
+.sd-root {{ position: fixed; top: 0; left: 0; width: calc(100vw / var(--sd-scale, 1));
+            height: calc(100vh / var(--sd-scale, 1)); transform: scale(var(--sd-scale, 1)); transform-origin: 0 0;
+            display: grid; grid-template-rows: 40px minmax(0, 1fr) 84px; grid-template-columns: minmax(0, 1fr);
+            color: var(--sd-text); font-family: system-ui, sans-serif; user-select: none; }}
+.sd-top {{ display: flex; align-items: center; gap: 18px; padding: 0 12px; background: var(--sd-surface);
+           border-bottom: 1px solid var(--sd-border); }}
+.sd-top-btns {{ display: flex; align-items: center; gap: 2px; margin-right: -6px; flex: none; }}
 .sd-alert {{ color: {NEGATIVE} !important; font-weight: 800; }}
-.sd-brand {{ font-weight: 800; letter-spacing: .12em; font-size: 15px; }}
-.sd-status {{ font: 12px ui-monospace, monospace; color: #57606a; white-space: nowrap; overflow: hidden;
-              text-overflow: ellipsis; }}
+.sd-brand {{ font-weight: 800; letter-spacing: .12em; font-size: 15px; white-space: nowrap; flex: none; }}
+.sd-status {{ font: 12px ui-monospace, monospace; color: var(--sd-muted); white-space: nowrap; overflow: hidden;
+              text-overflow: ellipsis; min-width: 0; }}
 .sd-main {{ display: grid; grid-template-columns: minmax(300px, 27%) minmax(0, 1fr) minmax(400px, 34%); gap: 10px;
             padding: 10px; min-height: 0; }}
-.sd-panel {{ position: relative; background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 10px 12px;
-             display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: hidden; }}
-.sd-title {{ font-size: 12px; font-weight: 800; letter-spacing: .14em; color: #57606a; }}
-.sd-bottom {{ display: flex; align-items: center; gap: 22px; padding: 0 14px; background: #fff;
-              border-top: 1px solid #d0d7de; }}
+.sd-panel {{ position: relative; background: var(--sd-surface); border: 1px solid var(--sd-border); border-radius: 10px;
+             padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: hidden; }}
+.sd-title {{ font-size: 12px; font-weight: 800; letter-spacing: .14em; color: var(--sd-muted); }}
+.sd-bottom {{ display: flex; align-items: center; gap: 22px; padding: 0 14px; background: var(--sd-surface);
+              border-top: 1px solid var(--sd-border); }}
 .sd-toggle .q-btn {{ font-size: 16px; font-weight: 800; letter-spacing: .06em; padding: 6px 18px; }}
+.sd-toggle .q-btn:not(.bg-primary) {{ background: var(--sd-toggle-bg); color: var(--sd-toggle-text); }}
 .sd-toggle-big .q-btn {{ font-size: 18px; padding: 10px 26px; }}
+.q-btn.sd-icon-btn {{ color: var(--sd-muted); }}
+.sd-bottom .q-slider__track {{ background: var(--sd-border); }}
 .q-btn.sd-stop {{ font-size: 18px; font-weight: 800; letter-spacing: .06em; padding: 10px 26px;
                   min-height: 48px; color: #fff !important; background: #d1242f !important; }}
-.sd-overlay {{ position: absolute; inset: 0; background: #ffffffb0; display: flex; align-items: center;
+.sd-overlay {{ position: absolute; inset: 0; background: var(--sd-veil); display: flex; align-items: center;
                justify-content: center; z-index: 5; cursor: pointer; }}
 .sd-loading {{ position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px; align-items: center;
-               justify-content: center; background: #e9eef3; z-index: 50; color: #57606a; font-weight: 700; }}
-.sd-overlay-btn {{ background: #fff; border: 2px solid {POSITIVE}; color: {POSITIVE}; border-radius: 10px;
+               justify-content: center; background: var(--sd-view); z-index: 50; color: var(--sd-muted);
+               font-weight: 700; }}
+.sd-overlay-btn {{ background: var(--sd-surface); border: 2px solid {POSITIVE}; color: {POSITIVE}; border-radius: 10px;
                    padding: 14px 22px; font-weight: 800; font-size: 16px; box-shadow: 0 4px 14px #0002; }}
+
+/* settings overlay */
+.q-dialog__inner--right:has(> .sd-settings) {{ padding: 0 !important; }}
+.sd-settings {{ width: min(480px, 100vw); height: 100%; display: flex; flex-direction: column;
+                background: var(--sd-surface); color: var(--sd-text); font-family: system-ui, sans-serif;
+                border-left: 1px solid var(--sd-border); }}
+.sd-settings-head {{ display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 10px 0 16px;
+                     border-bottom: 1px solid var(--sd-border); color: var(--sd-muted); flex: none; }}
+.sd-settings-body {{ flex: 1; min-height: 0; overflow-y: auto; padding: 0 16px 24px; }}
+.sd-set-group {{ padding: 18px 0 4px; display: flex; flex-direction: column; gap: 2px; }}
+.sd-set-group .sd-title {{ color: {POSITIVE}; }}
+.sd-set-row {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 200px); gap: 12px; align-items: center;
+               padding: 8px 0; border-top: 1px solid var(--sd-subtle); }}
+.sd-set-row:has(> .sd-set-ctl > .sd-set-value:only-child) {{ grid-template-columns: minmax(120px, 1fr) minmax(0, max-content); }}
+.sd-set-label {{ display: flex; flex-direction: column; min-width: 0; }}
+.sd-set-name {{ font-weight: 700; font-size: 14px; }}
+.sd-set-desc {{ font-size: 11px; color: var(--sd-muted); line-height: 1.3; }}
+.sd-set-key {{ font: 10px ui-monospace, monospace; color: var(--sd-neutral); overflow-wrap: anywhere; }}
+.sd-set-ctl {{ display: flex; justify-content: flex-end; min-width: 0; }}
+.sd-set-ctl > .q-field {{ width: 100%; }}
+.sd-set-value {{ font: 12px ui-monospace, monospace; text-align: right; overflow-wrap: anywhere; user-select: text; }}
+.sd-set-pad {{ padding: 8px 0; }}
+.sd-settings .sd-toggle .q-btn {{ font-size: 13px; padding: 4px 14px; }}
+.sd-scale {{ display: flex; align-items: center; gap: 8px; width: 100%; }}
+.sd-scale .q-slider {{ flex: 1; }}
+.sd-scale .sd-set-value {{ width: 44px; flex: none; }}
+.sd-set-more {{ border-top: 1px solid var(--sd-subtle); }}
+.sd-set-more .q-item {{ padding: 4px 0; font-size: 13px; color: var(--sd-muted); }}
 
 /* joints */
 .sd-jrows {{ display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; }}
 .sd-jrow {{ flex: 1; min-height: 0; display: grid; grid-template-columns: 50px minmax(0, 1fr) 84px;
             grid-template-rows: auto minmax(0, 1fr); column-gap: 10px; row-gap: 3px; align-items: center;
-            border-top: 1px solid #eaeef2; padding-top: 4px; }}
+            border-top: 1px solid var(--sd-subtle); padding-top: 4px; }}
 .sd-jrow:first-child {{ border-top: none; }}
 .sd-jname {{ grid-row: 1 / span 2; display: flex; flex-direction: column; align-items: center; line-height: 1.1; }}
 .sd-jnum {{ font-size: 20px; font-weight: 900; }}
-.sd-jkey {{ font: 700 10px ui-monospace, monospace; color: #57606a; border: 1px solid #c4ccd4; border-radius: 4px;
-            padding: 0 5px; margin-top: 2px; }}
+.sd-jkey {{ font: 700 10px ui-monospace, monospace; color: var(--sd-muted); border: 1px solid var(--sd-keycap);
+            border-radius: 4px; padding: 0 5px; margin-top: 2px; }}
 .sd-jpos {{ display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px; align-items: center;
-            font: 11px ui-monospace, monospace; color: #57606a; }}
-.sd-limit {{ height: 10px; background: linear-gradient(90deg, #ffd8c2 0 6%, #eaeef2 6% 94%, #ffd8c2 94%);
-             border-radius: 5px; position: relative; }}
+            font: 11px ui-monospace, monospace; color: var(--sd-muted); }}
+.sd-limit {{ height: 10px; border-radius: 5px; position: relative;
+             background: linear-gradient(90deg, var(--sd-limit) 0 6%, var(--sd-subtle) 6% 94%, var(--sd-limit) 94%); }}
 .sd-limit-mark {{ position: absolute; top: -3px; width: 6px; height: 16px; margin-left: -3px; border-radius: 3px;
-                  background: #24292f; }}
+                  background: var(--sd-text); }}
 .sd-jangle {{ font: 700 17px ui-monospace, monospace; text-align: right; }}
 .sd-jrow .sd-slider {{ grid-column: 2 / span 2; }}
-.sd-hint {{ font-size: 11px; color: #57606a; }}
+.sd-hint {{ font-size: 11px; color: var(--sd-muted); }}
 
 /* velocity slider */
 .sd-slider {{ position: relative; height: 100%; min-height: 30px; max-height: 52px; touch-action: none; cursor: ew-resize; }}
 .sd-slider-rail {{ position: absolute; left: 0; right: 0; top: 50%; height: 12px; margin-top: -6px; border-radius: 6px;
-                   background: #eaeef2; border: 1px solid #d0d7de; }}
+                   background: var(--sd-subtle); border: 1px solid var(--sd-border); }}
 .sd-slider-fill {{ position: absolute; top: 50%; height: 12px; margin-top: -6px; border-radius: 6px; }}
 .sd-slider-fill.sd-pos {{ background: {POSITIVE}; }}
 .sd-slider-fill.sd-neg {{ background: {NEGATIVE}; }}
-.sd-slider-zero {{ position: absolute; left: 50%; top: 15%; bottom: 15%; width: 2px; margin-left: -1px; background: #8c959f; }}
+.sd-slider-zero {{ position: absolute; left: 50%; top: 15%; bottom: 15%; width: 2px; margin-left: -1px;
+                   background: var(--sd-neutral); }}
 .sd-slider-sign {{ position: absolute; top: 50%; transform: translateY(-50%); font-weight: 900; font-size: 18px;
-                   color: #8c959f; }}
+                   color: var(--sd-neutral); }}
 .sd-minus {{ left: 6px; }} .sd-plus {{ right: 6px; }}
 .sd-slider-thumb {{ position: absolute; top: 50%; width: 44px; height: 30px; margin: -15px 0 0 -22px; border-radius: 8px;
-                    background: #fff; border: 2px solid #8c959f; box-shadow: 0 2px 5px #0003; }}
+                    background: var(--sd-thumb); border: 2px solid var(--sd-neutral); box-shadow: 0 2px 5px #0003; }}
 .sd-slider.sd-active .sd-slider-thumb.sd-pos {{ background: {POSITIVE}; border-color: {POSITIVE}; }}
 .sd-slider.sd-active .sd-slider-thumb.sd-neg {{ background: {NEGATIVE}; border-color: {NEGATIVE}; }}
 .sd-disabled {{ opacity: .45; pointer-events: none; }}
@@ -82,21 +140,21 @@ html, body {{ overflow: hidden; background: #e6eaee; }}
 /* pad / rocker */
 .sd-trans {{ flex: 1; min-height: 0; display: flex; gap: 10px; align-items: center; justify-content: center;
              container-type: size; }}
-.sd-pad {{ position: relative; touch-action: none; border-radius: 12px; background: #f6f8fa;
-           border: 2px solid #d0d7de; cursor: move; }}
+.sd-pad {{ position: relative; touch-action: none; border-radius: 12px; background: var(--sd-soft);
+           border: 2px solid var(--sd-border); cursor: move; }}
 .sd-pad-xy {{ width: min(100cqw - 88px, 100cqh); height: min(100cqw - 88px, 100cqh); flex: none; }}
 .sd-pad-y {{ width: 78px; height: min(100cqw - 88px, 100cqh); flex: none; }}
 .sd-pad.sd-active {{ border-color: {POSITIVE}; }}
-.sd-pad-hline, .sd-pad-vline {{ position: absolute; background: #d0d7de; }}
+.sd-pad-hline, .sd-pad-vline {{ position: absolute; background: var(--sd-border); }}
 .sd-pad-hline {{ left: 14px; right: 14px; top: 50%; height: 2px; }}
 .sd-pad-vline {{ top: 14px; bottom: 14px; left: 50%; width: 2px; }}
-.sd-pad-label {{ position: absolute; font: 800 16px system-ui, sans-serif; color: #57606a; }}
+.sd-pad-label {{ position: absolute; font: 800 16px system-ui, sans-serif; color: var(--sd-muted); }}
 .sd-left {{ left: 10px; top: 50%; transform: translateY(-50%); }}
 .sd-right {{ right: 10px; top: 50%; transform: translateY(-50%); }}
 .sd-up {{ top: 8px; left: 50%; transform: translateX(-50%); }}
 .sd-down {{ bottom: 8px; left: 50%; transform: translateX(-50%); }}
 .sd-puck {{ position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%;
-            background: #fff; border: 2px solid #8c959f; box-shadow: 0 2px 6px #0003; }}
+            background: var(--sd-thumb); border: 2px solid var(--sd-neutral); box-shadow: 0 2px 6px #0003; }}
 .sd-pad.sd-active .sd-puck {{ background: {POSITIVE}; border-color: {POSITIVE}; }}
 .sd-rot {{ display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; column-gap: 8px; height: 44px; }}
 .sd-rot-label {{ font-weight: 900; font-size: 15px; }}
@@ -131,9 +189,9 @@ class RobotView:
     RING_RADIUS, RING_TUBE, RING_LENGTH = 0.103, 0.006, 1.5 * math.pi
     FLOOR_SIZE, FLOOR_THICKNESS = 1.6, 0.01
 
-    def __init__(self, commander):
+    def __init__(self, commander, dark=False):
         self.c = commander
-        self.scene = ui.scene(grid=False, background_color="#e9eef3").classes(
+        self.scene = ui.scene(grid=False, background_color=VIEW_COLORS[dark][0]).classes(
             "w-full h-full"
         )
         ui.timer(
@@ -144,7 +202,7 @@ class RobotView:
         self.rings = {}  # joint -> (group, [parts], label)
         self._sent = {}
         with self.scene:
-            self._floor()
+            self._floor(dark)
             self.scene.axes_helper(0.2)
             self.tool_axes = self.scene.axes_helper(0.1)
             self.tcp_ring, self.tcp_ring_parts = self._ring_group()
@@ -153,19 +211,35 @@ class RobotView:
         for obj in (self.tcp_ring, self.arrow, self.arrow_head):
             obj.visible(False)
 
-    def _floor(self):
+    def _floor(self, dark):
         """Solid floor slab (visible from above and below) with a 10 cm grid on top."""
         half, t = self.FLOOR_SIZE / 2, self.FLOOR_THICKNESS
-        self.scene.box(self.FLOOR_SIZE, self.FLOOR_SIZE, t).material("#f4f6f8").move(
-            0, 0, -t / 2 - 0.001
+        _, floor, grid = VIEW_COLORS[dark]
+        self.floor = (
+            self.scene.box(self.FLOOR_SIZE, self.FLOOR_SIZE, t)
+            .material(floor)
+            .move(0, 0, -t / 2 - 0.001)
         )
+        self.grid = []
         for k in range(-8, 9):
-            self.scene.line([k / 10, -half, 0.0005], [k / 10, half, 0.0005]).material(
-                "#c4ccd4"
+            self.grid.append(
+                self.scene.line([k / 10, -half, 0.0005], [k / 10, half, 0.0005])
             )
-            self.scene.line([-half, k / 10, 0.0005], [half, k / 10, 0.0005]).material(
-                "#c4ccd4"
+            self.grid.append(
+                self.scene.line([-half, k / 10, 0.0005], [half, k / 10, 0.0005])
             )
+        for line in self.grid:
+            line.material(grid)
+
+    def set_dark(self, dark):
+        background, floor, grid = VIEW_COLORS[dark]
+        self.scene.props(f"background-color={background}")  # for a reconnecting browser
+        ui.run_javascript(
+            f"getElement({self.scene.id}).renderer?.setClearColor('{background}')"
+        )
+        self.floor.material(floor)
+        for line in self.grid:
+            line.material(grid)
 
     def _ring_group(self, label=None):
         """A 3D ring (tube arc + cone head) in the XY plane of a group, arrow head pointing to positive rotation."""
@@ -205,7 +279,7 @@ class RobotView:
             if label is not None:
                 self.scene.text(
                     label,
-                    "font: 700 12px system-ui; color: #24292f; background: #ffffffd0; padding: 0 4px; "
+                    "font: 700 12px system-ui; color: var(--sd-text); background: var(--sd-label-bg); padding: 0 4px; "
                     "border-radius: 4px",
                 ).move(-(r + 0.04), 0.0, 0.0)
         return group, parts
@@ -239,28 +313,28 @@ class RobotView:
     def _build(self, model):
         logger = self.c.get_logger()
         with self.scene:
-            for link, visuals in model.visuals.items():
-                for v in visuals:
-                    if v.kind == "mesh":
-                        url = glb_url(v.filename, logger)
-                        if url is None:
-                            continue
-                        obj = self.scene.gltf(url).scale(*v.scale)
-                    elif v.kind == "box":
-                        obj = self.scene.box(*v.size).material(
-                            v.color or "#c8ced5", v.opacity
-                        )
-                    elif v.kind == "cylinder":
-                        obj = self.scene.cylinder(
-                            v.size[0], v.size[0], v.size[1], 24
-                        ).material(v.color or "#c8ced5", v.opacity)
-                    else:
-                        obj = self.scene.sphere(v.size[0]).material(
-                            v.color or "#c8ced5", v.opacity
-                        )
-                    self.visual_objects.append(
-                        (obj, link, v.origin, v.kind == "cylinder")
+            for link, v in model.visuals():
+                g = v.geometry
+                color, opacity = model.color(v)
+                color = color or "#c8ced5"
+                if g.mesh is not None:
+                    url = glb_url(g.mesh.filename, logger)
+                    if url is None:
+                        continue
+                    obj = self.scene.gltf(url).scale(*model.mesh_scale(g.mesh))
+                elif g.box is not None:
+                    obj = self.scene.box(*map(float, g.box.size)).material(color, opacity)
+                elif g.cylinder is not None:
+                    r = g.cylinder.radius
+                    obj = self.scene.cylinder(r, r, g.cylinder.length, 24).material(
+                        color, opacity
                     )
+                elif g.sphere is not None:
+                    obj = self.scene.sphere(g.sphere.radius).material(color, opacity)
+                else:
+                    continue
+                origin = np.eye(4) if v.origin is None else v.origin
+                self.visual_objects.append((obj, link, origin, g.cylinder is not None))
             for name, joint in model.joints.items():
                 if joint.type in ("revolute", "continuous") and joint.mimic is None:
                     self.rings[name] = self._ring_group(self._label(name))
@@ -432,18 +506,54 @@ def build_page(commander):
     c = commander
 
     @ui.page("/")
-    def index():
+    def index(request: Request):
         ui.add_css(CSS)
         ui.colors(primary=POSITIVE)
-        toggle_props = "unelevated toggle-color=primary color=grey-3 text-color=grey-9"
+        toggle_props = "unelevated toggle-color=primary"
+        icon_props = "flat round dense"
+
+        prefs = {"dark": request.cookies.get(THEME_COOKIE) == "1"}
+        try:
+            scale = float(request.cookies.get(SCALE_COOKIE, 1.0))
+        except ValueError:
+            scale = 1.0
+        prefs["scale"] = min(max(scale, SCALE_MIN / 100), SCALE_MAX / 100)
+        dark_mode = ui.dark_mode(prefs["dark"])
+
+        def save_pref(name, value):
+            ui.run_javascript(
+                f"document.cookie = '{name}={quote(str(value))}; path=/; max-age=31536000; SameSite=Lax'"
+            )
+
+        def set_theme(dark):
+            if dark == prefs["dark"]:
+                return
+            prefs["dark"] = dark
+            dark_mode.set_value(dark)
+            view.set_dark(dark)
+            theme_button.props(f"icon={'light_mode' if dark else 'dark_mode'}")
+            settings.theme.set_value(dark)  # when switched with the top bar button
+            save_pref(THEME_COOKIE, int(dark))
+
+        def set_scale(value):
+            prefs["scale"] = value
+            root.style(f"--sd-scale: {value}")
+            save_pref(SCALE_COOKIE, value)
+            # the 3D view only adapts its canvas to a window resize
+            ui.run_javascript(
+                "setTimeout(() => window.dispatchEvent(new Event('resize')), 50)"
+            )
 
         def jog_key(index, value):
-            if c.mode == JOINT and index < len(c.joint_names):
+            # no keyboard jogging while the settings are open (and typing there is not swallowed)
+            if c.mode == JOINT and index < len(c.joint_names) and not settings.is_open:
                 c.set_input("k:" + c.joint_names[index], value)
 
         keys = KeyJog(len(c.joint_names) or 7, on_jog=jog_key, on_stop=c.stop)
 
-        with ui.element("div").classes("sd-root"):
+        with ui.element("div").classes("sd-root").style(
+            f"--sd-scale: {prefs['scale']}"
+        ) as root:
             # ---------------- top bar ----------------
             with ui.element("div").classes("sd-top"):
                 ui.label("SERVO PENDANT").classes("sd-brand")
@@ -451,15 +561,30 @@ def build_page(commander):
                 state_label = ui.label().classes("sd-status")
                 ui.space()
                 command_label = ui.label().classes("sd-status")
-                ui.button(
-                    icon="fullscreen",
-                    on_click=lambda: ui.run_javascript(
-                        "document.documentElement.requestFullscreen()"
-                        ".then(() => navigator.keyboard && navigator.keyboard.lock()).catch(() => {})"
-                    ),
-                ).props("flat round dense color=grey-8").tooltip(
-                    "Full screen (also lets Ctrl+1..9 reach the page)"
-                )
+                with ui.element("div").classes("sd-top-btns"):
+                    theme_button = (
+                        ui.button(
+                            icon="light_mode" if prefs["dark"] else "dark_mode",
+                            color=None,
+                            on_click=lambda: set_theme(not prefs["dark"]),
+                        )
+                        .props(icon_props)
+                        .classes("sd-icon-btn")
+                        .tooltip("Light / dark theme")
+                    )
+                    ui.button(icon="settings", color=None, on_click=lambda: settings.open()).props(
+                        icon_props
+                    ).classes("sd-icon-btn").tooltip("Settings")
+                    ui.button(
+                        icon="fullscreen",
+                        color=None,
+                        on_click=lambda: ui.run_javascript(
+                            "document.documentElement.requestFullscreen()"
+                            ".then(() => navigator.keyboard && navigator.keyboard.lock()).catch(() => {})"
+                        ),
+                    ).props(icon_props).classes("sd-icon-btn").tooltip(
+                        "Full screen (also lets Ctrl+1..9 reach the page)"
+                    )
 
             with ui.element("div").classes("sd-main"):
                 # ---------------- cartesian (left) ----------------
@@ -510,14 +635,15 @@ def build_page(commander):
                         view_hint = ui.label().classes("sd-hint")
                         ui.button(
                             icon="restart_alt",
+                            color=None,
                             on_click=lambda: view.reset_camera(),
-                        ).props("flat round dense color=grey-8").tooltip("Reset view")
+                        ).props(icon_props).classes("sd-icon-btn").tooltip("Reset view")
                     with (
                         ui.element("div")
                         .classes("w-full")
                         .style("flex: 1; min-height: 0; position: relative")
                     ):
-                        view = RobotView(c)
+                        view = RobotView(c, prefs["dark"])
                         with ui.element("div").classes("sd-loading") as loading_overlay:
                             ui.spinner(size="3em", thickness=4)
                             loading_label = ui.label("Loading robot ...")
@@ -555,12 +681,16 @@ def build_page(commander):
                         c.set_speed(e.value / 100),
                         speed_value.set_text(f"{e.value} %"),
                     ),
-                ).props("thumb-size=40px track-size=12px track-color=grey-4").classes("flex-1")
+                ).props("thumb-size=40px track-size=12px").classes("flex-1")
                 ui.button("STOP", on_click=c.stop, color="red-8").classes(
                     "sd-stop"
                 ).props("unelevated").tooltip(
                     "Releases all inputs and calls the driver stop service (software stop, not an E-stop)"
                 )
+
+        settings = SettingsPanel(
+            c, prefs["dark"], prefs["scale"], on_theme=set_theme, on_scale=set_scale
+        )
 
         # ---------------- joint rows ----------------
         joint_widgets = {}
@@ -643,10 +773,10 @@ def build_page(commander):
                 q = positions[name]
                 angle.set_text(f"{math.degrees(q):+.1f}°")
                 if model is not None and name in model.joints:
-                    j = model.joints[name]
-                    lo.set_text(f"{math.degrees(j.lower):.0f}°")
-                    hi.set_text(f"{math.degrees(j.upper):.0f}°")
-                    frac = (q - j.lower) / ((j.upper - j.lower) or 1.0)
+                    lower, upper = model.limits(model.joints[name])
+                    lo.set_text(f"{math.degrees(lower):.0f}°")
+                    hi.set_text(f"{math.degrees(upper):.0f}°")
+                    frac = (q - lower) / ((upper - lower) or 1.0)
                     mark.style(f"left: {100 * min(max(frac, 0.0), 1.0):.1f}%")
             age = c.joint_states_age()
             servo_label.set_text(c.servo_status)

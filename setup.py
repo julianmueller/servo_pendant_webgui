@@ -26,7 +26,7 @@ setup(
     ],
     package_data={package_name: ["components/*.js"]},
     include_package_data=True,
-    install_requires=["setuptools", "nicegui", "trimesh", "pycollada"],
+    install_requires=["setuptools", "nicegui", "trimesh", "pycollada", "yourdfpy"],
     zip_safe=True,
     maintainer="jmueller",
     maintainer_email="julian.mueller@iwb.tum.de",

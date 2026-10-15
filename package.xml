@@ -16,7 +16,7 @@
     <depend>moveit_msgs</depend>
     <exec_depend>python3-numpy</exec_depend>
     <exec_depend>ament_index_python</exec_depend>
-    <!-- nicegui, trimesh and pycollada are installed with pip (into the venv) -->
+    <!-- nicegui, trimesh, pycollada and yourdfpy are installed with pip (into the venv) -->
 
     <test_depend>ament_copyright</test_depend>
     <test_depend>ament_flake8</test_depend>

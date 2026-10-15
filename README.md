@@ -1,6 +1,6 @@
 # Servo Pendant Webgui
 
-Touch-friendly webgui for MoveIt Servo, laid out like a robot teach pendant, made with [NiceGUI](https://nicegui.io)
+Touch-friendly webgui for MoveIt Servo (light / dark theme, scalable), laid out like a robot teach pendant, made with [NiceGUI](https://nicegui.io)
 
 ![Screenshot of the ui](docs/screenshot.png)
 
@@ -13,7 +13,7 @@ mouse, touch and keyboard.
 ```bash
 python3 -m venv .venv --system-site-packages
 source .venv/bin/activate
-pip install nicegui trimesh pycollada
+pip install nicegui trimesh pycollada yourdfpy
 colcon build --symlink-install servo_pendant_webgui
 ```
 
@@ -60,6 +60,16 @@ Start it next to `ros2 launch *_moveit_config moveit.launch.py launch_servo:=tru
   - Cartesian mode: an arrow and/or ring at the tool shows the commanded motion.
   - Blue = positive, orange = negative. The arrow head of a moving joint's ring points in its direction of motion.
   - A loading overlay is shown until the robot description has arrived and all meshes are loaded in the browser.
+- **Top right**: light / dark theme, settings and full screen.
+- **Settings** (gear, top right): an overlay with every setting, grouped:
+  - **Interface**: theme and UI scale (60 … 160 %). Kept per browser (cookies).
+  - **Robot control**: base / tool frame (links of the URDF, or any name), max speeds, `input_timeout`,
+    `publish_rate`, `exclude_joints`. Applied at once to every connected panel (they are node parameters).
+  - **Topics & services**, **web server**: the read-only node parameters.
+  - **MoveIt Servo**: Servo's parameters (`moveit_servo.*`: move group, command out topic, ...), read from its node
+    (`/servo_node`, from `switch_command_type_service`). Read-only.
+  - **ROS**: node name, `ROS_DOMAIN_ID`, RMW implementation, discovery range. Fixed when the node starts.
+  - Keyboard jogging is off while the settings are open.
 - **Status line (top)**: Servo mode, the age of the joint states, and a warning if more than one node publishes
   `/joint_states` (cross-talk, e.g. another robot in the same ROS domain). Joint states with a timestamp older than
   the newest one received are ignored.
@@ -86,3 +96,7 @@ explicitly. After a release, three zero commands are sent, then the stream stops
 | `switch_command_type_service` | `/servo_node/switch_command_type` |
 | `publish_rate` [Hz], `input_timeout` [s] | `50`, `0.3` |
 | `exclude_joints` (regexes) | `['.*finger.*']` |
+
+The frames, speeds, `publish_rate`, `input_timeout` and `exclude_joints` can be changed while the node runs, in the
+settings or with `ros2 param set` (all held inputs are released on a change). The topics, the service, `host` and
+`port` are read-only: set them at launch.
