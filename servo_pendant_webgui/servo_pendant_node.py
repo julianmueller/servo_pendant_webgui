@@ -52,7 +52,7 @@ def main():
         host=commander.host,
         port=commander.port,
         title="Servo Pendant",
-        dark=True,
+        dark=False,  # each page applies the theme stored in its browser
         reload=False,
         show=False,
         favicon="🕹️",

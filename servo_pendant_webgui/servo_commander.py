@@ -1,3 +1,5 @@
+import concurrent.futures
+import os
 import re
 import threading
 import time
@@ -5,11 +7,15 @@ import time
 import numpy as np
 
 from rclpy.node import Node
+from rclpy.parameter import Parameter, parameter_value_to_python
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.utilities import get_rmw_implementation_identifier
 
 from control_msgs.msg import JointJog
 from geometry_msgs.msg import TwistStamped
 from moveit_msgs.srv import ServoCommandType
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
+from rcl_interfaces.srv import GetParameters, ListParameters
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
@@ -28,6 +34,26 @@ PLANES = {
 }
 AXIS_NAMES = "XYZ"
 
+# Parameters that can be changed while the node runs (settings panel or `ros2 param set`). All others are read-only:
+# they are set at launch.
+LIVE_PARAMETERS = (
+    "base_frame",
+    "tool_frame",
+    "max_linear_speed",
+    "max_angular_speed",
+    "max_joint_speed",
+    "input_timeout",
+    "publish_rate",
+    "exclude_joints",
+)
+_POSITIVE = (
+    "max_linear_speed",
+    "max_angular_speed",
+    "max_joint_speed",
+    "input_timeout",
+    "publish_rate",
+)
+
 
 def _shape(v):
     """Quadratic response: fine control near the centre, full speed at the edge."""
@@ -44,26 +70,35 @@ class ServoCommander(Node):
 
     def __init__(self):
         super().__init__("servo_pendant_webgui")
-        p = self.declare_parameter
-        p("twist_topic", "/servo_node/delta_twist_cmds")
-        p("joint_jog_topic", "/servo_node/delta_joint_cmds")
-        p("joint_states_topic", "/joint_states")
-        p("robot_description_topic", "/robot_description")
-        p("switch_command_type_service", "/servo_node/switch_command_type")
-        p("base_frame", "panda_link0")
-        p("tool_frame", "panda_link8")
-        p("max_linear_speed", 0.1)  # [m/s] at full deflection and 100 % speed
-        p("max_angular_speed", 0.5)  # [rad/s]
-        p("max_joint_speed", 0.5)  # [rad/s]
-        p("publish_rate", 50.0)  # [Hz]
+        def p(name, default, description):
+            descriptor = ParameterDescriptor(
+                description=description, read_only=name not in LIVE_PARAMETERS
+            )
+            self.declare_parameter(name, default, descriptor)
+
+        p("twist_topic", "/servo_node/delta_twist_cmds", "Cartesian commands to Servo")
+        p("joint_jog_topic", "/servo_node/delta_joint_cmds", "Joint commands to Servo")
+        p("joint_states_topic", "/joint_states", "Joint positions of the robot")
+        p("robot_description_topic", "/robot_description", "URDF for the 3D view and limits")
         p(
-            "input_timeout", 0.3
-        )  # [s] an input that is not refreshed for this long counts as released
+            "switch_command_type_service",
+            "/servo_node/switch_command_type",
+            "Switches Servo between joint and Cartesian commands",
+        )
+        p("base_frame", "panda_link0", "Frame of Cartesian commands in BASE mode")
+        p("tool_frame", "panda_link8", "Frame of Cartesian commands in TOOL mode")
+        p("max_linear_speed", 0.1, "[m/s] at full deflection and 100 % speed")
+        p("max_angular_speed", 0.5, "[rad/s] at full deflection and 100 % speed")
+        p("max_joint_speed", 0.5, "[rad/s] at full deflection and 100 % speed")
+        p("publish_rate", 50.0, "[Hz] of the commands sent to Servo")
         p(
-            "exclude_joints", [".*finger.*"]
-        )  # regexes of joint_states names not shown in the panel
-        p("host", "0.0.0.0")
-        p("port", 8080)
+            "input_timeout",
+            0.3,
+            "[s] an input that is not refreshed for this long counts as released",
+        )
+        p("exclude_joints", [".*finger.*"], "Regexes of joints not shown in the panel")
+        p("host", "0.0.0.0", "Network interface of the web server")
+        p("port", 8080, "Port of the web server")
 
         def val(name):
             return self.get_parameter(name).value
@@ -77,6 +112,8 @@ class ServoCommander(Node):
         self.host = val("host")
         self.port = val("port")
         self._exclude = [re.compile(r) for r in val("exclude_joints")]
+        # MoveIt Servo's node, from its service name (its parameters, like the move group, are shown in the settings)
+        self.servo_node = val("switch_command_type_service").rsplit("/", 1)[0] or "/"
 
         self._lock = threading.Lock()
         self._inputs = {}  # key -> (value, monotonic time)
@@ -88,6 +125,7 @@ class ServoCommander(Node):
         self.last_command = "idle"
 
         self.joint_names = []  # arm joints shown in the panel, in joint_states order
+        self._seen_joints = []  # all joint_states names in order, to filter again when exclude_joints changes
         self.positions = {}
         self._joint_states_time = 0.0
         self.model = None
@@ -115,9 +153,20 @@ class ServoCommander(Node):
         self._switch_client = self.create_client(
             ServoCommandType, val("switch_command_type_service")
         )
-        self.create_timer(1.0 / val("publish_rate"), self._publish)
+        servo = self.servo_node.rstrip("/")
+        self._servo_list_parameters = self.create_client(
+            ListParameters, f"{servo}/list_parameters"
+        )
+        self._servo_get_parameters = self.create_client(
+            GetParameters, f"{servo}/get_parameters"
+        )
+        self._publish_timer = self.create_timer(
+            1.0 / val("publish_rate"), self._publish
+        )
         self.create_timer(1.0, self._watch_servo)
         self.create_timer(2.0, self._check_joint_states_publishers)
+        self.add_on_set_parameters_callback(self._validate_parameters)
+        self.add_post_set_parameters_callback(self._apply_parameters)
 
     # ------------------------------------------------------------------ #
     #  Inputs from the web panel (called from the web server thread)
@@ -150,6 +199,14 @@ class ServoCommander(Node):
     def stop(self):
         """Release every input and ask the driver to stop the current motion."""
         self.release_all()
+
+    def set_parameter_value(self, name, value):
+        """Sets one of the node's parameters. Returns (successful, reason)."""
+        kind = self.get_parameter(name).type_
+        if kind == Parameter.Type.DOUBLE:
+            value = float(value)
+        result = self.set_parameters([Parameter(name, kind, value)])[0]
+        return result.successful, result.reason
 
     def active_inputs(self):
         """Inputs that are currently held, without expired ones."""
@@ -282,6 +339,112 @@ class ServoCommander(Node):
         future.add_done_callback(done)
 
     # ------------------------------------------------------------------ #
+    #  Parameters
+    # ------------------------------------------------------------------ #
+
+    def _validate_parameters(self, params):
+        def reject(reason):
+            return SetParametersResult(successful=False, reason=reason)
+
+        for prm in params:
+            if prm.name in ("base_frame", "tool_frame") and not prm.value.strip():
+                return reject(f"{prm.name} must not be empty")
+            if prm.name in _POSITIVE and not prm.value > 0.0:
+                return reject(f"{prm.name} must be > 0")
+            if prm.name == "publish_rate" and prm.value > 1000.0:
+                return reject("publish_rate must be <= 1000 Hz")
+            if prm.name == "exclude_joints":
+                for r in prm.value:
+                    try:
+                        re.compile(r)
+                    except re.error as e:
+                        return reject(f"invalid regex {r!r}: {e}")
+        return SetParametersResult(successful=True)
+
+    def _apply_parameters(self, params):
+        # a changed frame, speed or joint list must never carry on an ongoing jog
+        self.release_all()
+        for prm in params:
+            name, value = prm.name, prm.value
+            if name == "base_frame":
+                self.base_frame = value.strip()
+            elif name == "tool_frame":
+                self.tool_frame = value.strip()
+            elif name == "max_linear_speed":
+                self.max_linear = value
+            elif name == "max_angular_speed":
+                self.max_angular = value
+            elif name == "max_joint_speed":
+                self.max_joint = value
+            elif name == "input_timeout":
+                self.input_timeout = value
+            elif name == "publish_rate":
+                self._publish_timer.timer_period_ns = 1e9 / value
+            elif name == "exclude_joints":
+                with self._lock:
+                    self._exclude = [re.compile(r) for r in value]
+                    self.joint_names = [
+                        n for n in self._seen_joints if not self._excluded(n)
+                    ]
+
+    def _excluded(self, joint):
+        return any(r.fullmatch(joint) for r in self._exclude)
+
+    def ros_info(self):
+        """How this node is connected to ROS. All of it is fixed when the node starts."""
+        return {
+            "Node": self.get_fully_qualified_name(),
+            "ROS_DOMAIN_ID": str(self.context.get_domain_id()),
+            "RMW implementation": get_rmw_implementation_identifier(),
+            "Discovery range": os.environ.get(
+                "ROS_AUTOMATIC_DISCOVERY_RANGE", "SUBNET (default)"
+            ),
+        }
+
+    def fetch_servo_parameters(self):
+        """MoveIt Servo's parameters (`moveit_servo.*`, without the prefix), read from its node.
+
+        Returns a concurrent.futures.Future of {name: value}, so the web page can await it.
+        """
+        result = concurrent.futures.Future()
+        if not (
+            self._servo_list_parameters.service_is_ready()
+            and self._servo_get_parameters.service_is_ready()
+        ):
+            result.set_exception(RuntimeError(f"{self.servo_node} not available"))
+            return result
+
+        def failed(f):
+            if f.exception() is None and f.result() is not None:
+                return False
+            result.set_exception(RuntimeError(f"{self.servo_node} did not answer"))
+            return True
+
+        def got(names, f):
+            if not failed(f):
+                values = f.result().values
+                result.set_result(
+                    {
+                        n.removeprefix("moveit_servo."): parameter_value_to_python(v)
+                        for n, v in zip(names, values)
+                    }
+                )
+
+        def listed(f):
+            if failed(f):
+                return
+            names = sorted(f.result().result.names)
+            self._servo_get_parameters.call_async(
+                GetParameters.Request(names=names)
+            ).add_done_callback(lambda g: got(names, g))
+
+        request = ListParameters.Request(
+            prefixes=["moveit_servo"], depth=ListParameters.Request.DEPTH_RECURSIVE
+        )
+        self._servo_list_parameters.call_async(request).add_done_callback(listed)
+        return result
+
+    # ------------------------------------------------------------------ #
     #  Robot state
     # ------------------------------------------------------------------ #
 
@@ -294,10 +457,10 @@ class ServoCommander(Node):
                         continue  # older than what we already have (stale publisher / out of order)
                     self._joint_stamps[name] = stamp
                 self.positions[name] = position
-                if name not in self.joint_names and not any(
-                    r.fullmatch(name) for r in self._exclude
-                ):
-                    self.joint_names.append(name)
+                if name not in self._seen_joints:
+                    self._seen_joints.append(name)
+                    if not self._excluded(name):
+                        self.joint_names.append(name)
             self._joint_states_time = time.monotonic()
 
     def _on_robot_description(self, msg):

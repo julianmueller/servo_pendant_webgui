@@ -81,6 +81,7 @@ class UrdfModel:
     joints: dict = field(default_factory=dict)
     visuals: dict = field(default_factory=dict)  # link -> [UrdfVisual]
     root: str = ''
+    links: list = field(default_factory=list)  # link names, in URDF order
 
     @classmethod
     def from_xml(cls, xml):
@@ -88,6 +89,7 @@ class UrdfModel:
         tree = ET.fromstring(xml)
         children = set()
         links = [link.get('name') for link in tree.findall('link')]
+        model.links = links
         named = {}
         for m in tree.findall('material'):
             c = m.find('color')
