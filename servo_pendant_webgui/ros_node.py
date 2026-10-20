@@ -1,5 +1,9 @@
+"""
+All ROS communication of the servo pendant: jog inputs of every browser in, MoveIt Servo commands out, plus the
+robot state for the page. The callbacks run in the ROS thread and only store data under the lock.
+"""
+
 import concurrent.futures
-import os
 import re
 import threading
 import time
@@ -9,7 +13,6 @@ import numpy as np
 from rclpy.node import Node
 from rclpy.parameter import Parameter, parameter_value_to_python
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from rclpy.utilities import get_rmw_implementation_identifier
 
 from control_msgs.msg import JointJog
 from geometry_msgs.msg import TwistStamped
@@ -18,13 +21,13 @@ from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rcl_interfaces.srv import GetParameters, ListParameters
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
-from std_srvs.srv import Trigger
 
 from servo_pendant_webgui.mesh_cache import glb_url
 from servo_pendant_webgui.urdf_kinematics import UrdfModel
 
 JOINT = "joint"
 TWIST = "twist"
+MODE_NAMES = {JOINT: "joint", TWIST: "Cartesian"}
 
 # Which base/tool axes the 2D pad (horizontal, vertical) and the 1D rocker drive, per plane
 PLANES = {
@@ -68,8 +71,9 @@ class ServoCommander(Node):
     they are touched), so a lost connection or a stuck browser can never leave the robot moving.
     """
 
-    def __init__(self):
-        super().__init__("servo_pendant_webgui")
+    def __init__(self, **kwargs):  # kwargs from RosBridge: context, namespace, parameter_overrides
+        super().__init__("servo_pendant_webgui", **kwargs)
+
         def p(name, default, description):
             descriptor = ParameterDescriptor(
                 description=description, read_only=name not in LIVE_PARAMETERS
@@ -85,8 +89,8 @@ class ServoCommander(Node):
             "/servo_node/switch_command_type",
             "Switches Servo between joint and Cartesian commands",
         )
-        p("base_frame", "panda_link0", "Frame of Cartesian commands in BASE mode")
-        p("tool_frame", "panda_link8", "Frame of Cartesian commands in TOOL mode")
+        p("base_frame", "panda_link0", "Frame of Cartesian commands in base mode")
+        p("tool_frame", "panda_link8", "Frame of Cartesian commands in tool mode")
         p("max_linear_speed", 0.1, "[m/s] at full deflection and 100 % speed")
         p("max_angular_speed", 0.5, "[rad/s] at full deflection and 100 % speed")
         p("max_joint_speed", 0.5, "[rad/s] at full deflection and 100 % speed")
@@ -97,8 +101,6 @@ class ServoCommander(Node):
             "[s] an input that is not refreshed for this long counts as released",
         )
         p("exclude_joints", [".*finger.*"], "Regexes of joints not shown in the panel")
-        p("host", "0.0.0.0", "Network interface of the web server")
-        p("port", 8080, "Port of the web server")
 
         def val(name):
             return self.get_parameter(name).value
@@ -109,8 +111,6 @@ class ServoCommander(Node):
         self.max_angular = val("max_angular_speed")
         self.max_joint = val("max_joint_speed")
         self.input_timeout = val("input_timeout")
-        self.host = val("host")
-        self.port = val("port")
         self._exclude = [re.compile(r) for r in val("exclude_joints")]
         # MoveIt Servo's node, from its service name (its parameters, like the move group, are shown in the settings)
         self.servo_node = val("switch_command_type_service").rsplit("/", 1)[0] or "/"
@@ -129,12 +129,13 @@ class ServoCommander(Node):
         self.positions = {}
         self._joint_states_time = 0.0
         self.model = None
-        self.model_status = "Waiting for /robot_description ..."
+        self.model_status = "Waiting for the robot description"
         self._joint_states_topic = val("joint_states_topic")
+        self.robot_description_topic = val("robot_description_topic")
         self.joint_states_warning = ""
         self._joint_stamps = {}  # joint -> newest joint_states stamp [s], to drop stale / out-of-order messages
 
-        self.servo_status = "waiting for servo_node"
+        self.servo_status = ("warn", "Waiting for Servo")  # (level ok / warn / bad, text) for the page
         self._servo_was_ready = False
 
         self._twist_pub = self.create_publisher(TwistStamped, val("twist_topic"), 10)
@@ -314,12 +315,12 @@ class ServoCommander(Node):
         if ready and not self._servo_was_ready:
             self._send_command_type()  # (re)appeared: make Servo match the panel's mode
         elif not ready:
-            self.servo_status = "servo_node not available"
+            self.servo_status = ("warn", "Servo not available")
         self._servo_was_ready = ready
 
     def _send_command_type(self):
         if not self._switch_client.service_is_ready():
-            self.servo_status = "servo_node not available"
+            self.servo_status = ("warn", "Servo not available")
             return
         request = ServoCommandType.Request()
         request.command_type = (
@@ -332,9 +333,8 @@ class ServoCommander(Node):
 
         def done(f):
             ok = f.result() is not None and f.result().success
-            self.servo_status = (
-                f"servo: {mode} mode" if ok else f"servo rejected {mode} mode"
-            )
+            name = MODE_NAMES[mode]
+            self.servo_status = ("ok", f"Servo: {name} mode") if ok else ("bad", f"Servo rejected {name} mode")
 
         future.add_done_callback(done)
 
@@ -389,17 +389,6 @@ class ServoCommander(Node):
 
     def _excluded(self, joint):
         return any(r.fullmatch(joint) for r in self._exclude)
-
-    def ros_info(self):
-        """How this node is connected to ROS. All of it is fixed when the node starts."""
-        return {
-            "Node": self.get_fully_qualified_name(),
-            "ROS_DOMAIN_ID": str(self.context.get_domain_id()),
-            "RMW implementation": get_rmw_implementation_identifier(),
-            "Discovery range": os.environ.get(
-                "ROS_AUTOMATIC_DISCOVERY_RANGE", "SUBNET (default)"
-            ),
-        }
 
     def fetch_servo_parameters(self):
         """MoveIt Servo's parameters (`moveit_servo.*`, without the prefix), read from its node.
@@ -471,7 +460,7 @@ class ServoCommander(Node):
             return
 
         def prepare():
-            self.model_status = "Converting robot meshes ..."
+            self.model_status = "Converting the robot meshes"
             # convert the meshes for the 3D view up front (cached), so the web page never waits for it
             meshes = model.mesh_filenames()
             for filename in meshes:

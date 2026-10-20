@@ -28,7 +28,7 @@ export default {
       if (this.editable(e)) return;
       this.negative = e.ctrlKey || e.shiftKey;
       if (e.code === "Escape") {
-        e.preventDefault();
+        // not prevented: dialogs close with Esc as well
         this.releaseAll();
         this.$emit("stop");
         return;

@@ -5,15 +5,15 @@ const MARGIN = 30; // px, half the puck size
 
 export default {
   template: `
-    <div class="sd-pad" ref="pad" :class="{ 'sd-active': active, 'sd-disabled': disabled, ['sd-pad-' + axes]: true }"
+    <div class="sp-pad" ref="pad" :class="{ 'sp-active': active, 'sp-disabled': disabled, ['sp-pad-' + axes]: true }"
          @pointerdown.prevent="onDown" @pointermove.prevent="onMove" @pointerup="release" @pointercancel="release">
-      <div v-if="axes !== 'y'" class="sd-pad-hline"></div>
-      <div v-if="axes !== 'x'" class="sd-pad-vline"></div>
-      <div v-if="labels.left" class="sd-pad-label sd-left">{{ labels.left }}</div>
-      <div v-if="labels.right" class="sd-pad-label sd-right">{{ labels.right }}</div>
-      <div v-if="labels.up" class="sd-pad-label sd-up">{{ labels.up }}</div>
-      <div v-if="labels.down" class="sd-pad-label sd-down">{{ labels.down }}</div>
-      <div class="sd-puck" :style="puckStyle"></div>
+      <div v-if="axes !== 'y'" class="sp-pad-hline"></div>
+      <div v-if="axes !== 'x'" class="sp-pad-vline"></div>
+      <div v-if="labels.left" class="sp-pad-label sp-left">{{ labels.left }}</div>
+      <div v-if="labels.right" class="sp-pad-label sp-right">{{ labels.right }}</div>
+      <div v-if="labels.up" class="sp-pad-label sp-up">{{ labels.up }}</div>
+      <div v-if="labels.down" class="sp-pad-label sp-down">{{ labels.down }}</div>
+      <div class="sp-puck" :style="puckStyle"></div>
     </div>`,
   props: {
     axes: { type: String, default: "xy" },

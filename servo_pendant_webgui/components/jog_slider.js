@@ -5,14 +5,14 @@ const MARGIN = 22; // px, half the thumb width
 
 export default {
   template: `
-    <div class="sd-slider" ref="track" :class="{ 'sd-active': active || external !== 0, 'sd-disabled': disabled }"
+    <div class="sp-slider" ref="track" :class="{ 'sp-active': active || external !== 0, 'sp-disabled': disabled }"
          @pointerdown.prevent="onDown" @pointermove.prevent="onMove" @pointerup="release" @pointercancel="release">
-      <div class="sd-slider-rail"></div>
-      <div class="sd-slider-fill" :class="shown >= 0 ? 'sd-pos' : 'sd-neg'" :style="fillStyle"></div>
-      <div class="sd-slider-zero"></div>
-      <div class="sd-slider-sign sd-minus">&#8722;</div>
-      <div class="sd-slider-sign sd-plus">+</div>
-      <div class="sd-slider-thumb" :class="shown >= 0 ? 'sd-pos' : 'sd-neg'" :style="thumbStyle"></div>
+      <div class="sp-slider-rail"></div>
+      <div class="sp-slider-fill" :class="shown >= 0 ? 'sp-pos' : 'sp-neg'" :style="fillStyle"></div>
+      <div class="sp-slider-zero"></div>
+      <div class="sp-slider-sign sp-minus">&#8722;</div>
+      <div class="sp-slider-sign sp-plus">+</div>
+      <div class="sp-slider-thumb" :class="shown >= 0 ? 'sp-pos' : 'sp-neg'" :style="thumbStyle"></div>
     </div>`,
   props: {
     disabled: { type: Boolean, default: false },
