@@ -1,7 +1,8 @@
 """
 The pendant (workbench layout, like a robot teach pendant): Cartesian jogging left, the robot in the middle, the
-joints right, and mode, speed and STOP in the action bar at the bottom. One screen without scrolling from 1280×800;
-one column with scrolling on narrow screens.
+joints right, and mode, speed and STOP in the action bar at the bottom. The three panels fill the browser width, a
+third each at the start, and their borders can be dragged (two nested splitters). One screen without scrolling from
+1280×800; on narrow screens one column with scrolling: the control of the active mode, the robot below it.
 
 The page is rebuilt whenever the bridge has a new node (domain change in the settings), since every control talks to
 the node it was built for.
@@ -21,26 +22,62 @@ TOGGLE = "no-caps unelevated toggle-color=primary"
 STATUS_ICONS = {"ok": "sym_o_check_circle", "warn": "sym_o_warning", "bad": "sym_o_error"}
 
 CSS = """
-:root { --sp-bar-h: 77px; }
-.sp-main { display: grid; gap: 16px; user-select: none;
-           grid-template-columns: minmax(300px, 27%) minmax(0, 1fr) minmax(380px, 34%);
-           height: calc(100dvh - var(--wg-header-h) - var(--sp-bar-h) - 32px); min-height: 600px; }
-.sp-main > .sp-wide { grid-column: 1 / -1; justify-content: center; }
-.wg-panel.sp-panel { position: relative; gap: 8px; min-height: 0; overflow: hidden; }
+:root { --sp-bar-h: 77px; --sp-bar-space: var(--sp-bar-h); }  /* space: the footer's measured height (BAR_JS) */
+.sp-main { display: flex; user-select: none; min-height: 560px;
+           height: calc(100dvh - var(--wg-header-h) - var(--sp-bar-space) - 2 * var(--wg-space)); }
+.sp-main > .sp-wide { flex: 1; justify-content: center; }
+.wg-panel.sp-panel { position: relative; gap: 8px; min-height: 0; overflow: hidden; flex: 1; }
+
+/* resizable panels: two nested splitters (outer: Cartesian | rest, inner: robot | joints). The handles take no
+   width; the gaps are paddings of the splitter parts, shared so that 1/3 and 1/2 give three equal panels. The handle
+   is 44 px wide to grab (also by touch) and lies in the gap. */
+.sp-split { width: 100%; height: 100%; --sp-gap: var(--wg-space); }
+.sp-split > .q-splitter__panel { display: flex; flex-direction: row; align-items: stretch; min-width: 0;
+                                 overflow: hidden; }
+.sp-outer > .q-splitter__before { padding-right: calc(var(--sp-gap) * 2 / 3); }
+.sp-inner > .q-splitter__before { padding: 0 calc(var(--sp-gap) / 3); }
+.sp-inner > .q-splitter__after { padding-left: calc(var(--sp-gap) * 2 / 3); }
+.sp-split > .q-splitter__separator { width: 0; background: transparent; overflow: visible; z-index: 6; }
+.sp-split > .q-splitter__separator > .q-splitter__separator-area { left: -22px; right: -22px; display: flex;
+  align-items: center; justify-content: center; color: var(--wg-subtle); }
+.sp-outer > .q-splitter__separator .q-icon { transform: translateX(calc(var(--sp-gap) / -6)); }
+.sp-inner > .q-splitter__separator .q-icon { transform: translateX(calc(var(--sp-gap) / 6)); }
+.sp-split > .q-splitter__separator:hover .q-icon, .sp-split.q-splitter--active > .q-splitter__separator .q-icon {
+  color: var(--wg-primary); }
 .sp-row { display: flex; align-items: center; gap: 12px; }
+/* narrow panels: the title keeps its width, the hint next to it is cut off with an ellipsis */
+.sp-panel > .wg-panel-head > .wg-h2 { flex: none; }
+.sp-panel > .wg-panel-head > .wg-hint { flex: 1; text-align: right; }
+.sp-panel > .wg-panel-head > .q-btn-toggle { margin-left: auto; }
+/* The action bar (mode, speed, STOP) is the footer: it is built in the shell footer's app slot, which takes the
+   footer's whole width and height, and the shell's node / version line is hidden (node and version are in
+   Settings > About). Quasar keeps the page clear of the footer, whatever its height. */
+.q-footer.wg-footer { height: auto; padding: 0; color: var(--wg-text); }
+.wg-footer > .wg-footer-shell { display: none; }
+.wg-footer > .wg-footer-app { overflow: visible; }
+.wg-footer-app > .wg-actionbar.sp-bar { position: static; display: flex; border-top: none; }
+.wg-footer .sp-bar .q-icon { font-size: 1.715em; color: inherit; }  /* undo the footer's small grey fact icons */
 .sp-bar { width: 100%; min-height: var(--sp-bar-h); user-select: none; }
-.sp-mode .q-btn { min-height: 54px; font-size: 17px; padding: 0 24px; }  /* + toggle border: 56 px like STOP */
+/* + toggle border: 56 px like STOP */
+.sp-mode .q-btn { min-height: 54px; font-size: var(--wg-fs-lg); padding: 0 24px; }
 .sp-speed { flex: 1; display: flex; align-items: center; gap: 16px; min-width: 240px; }
-.sp-speed-value { font-size: 17px; font-weight: 600; width: 52px; text-align: right; }
+.sp-speed-value { font-size: var(--wg-fs-lg); font-weight: 600; width: 52px; text-align: right; }
+/* the shell makes sliders 44 px high for touch, but Quasar keeps the track at the top: centre it */
+.sp-speed .q-slider { justify-content: center; }
 
 /* mode overlay: tap the dimmed side to switch to its mode */
 .sp-overlay { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center;
               cursor: pointer; background: color-mix(in srgb, var(--wg-surface) 72%, transparent); }
 .sp-overlay-btn { background: var(--wg-surface); color: var(--wg-primary); border: 2px solid var(--wg-primary);
-                  border-radius: var(--wg-radius); padding: 12px 20px; font-size: 17px; font-weight: 600; }
+                  border-radius: var(--wg-radius); padding: 12px 20px; font-size: var(--wg-fs-lg); font-weight: 600; }
 
 /* robot */
-.sp-view { flex: 1; min-height: 0; position: relative; border-radius: var(--wg-radius-sm); overflow: hidden; }
+.sp-view { flex: 1; min-height: 0; position: relative; border-radius: var(--wg-radius-sm); overflow: hidden;
+           isolation: isolate; }  /* its loading overlay must stay below the sticky action bar when scrolling */
+/* The scene fills the view absolutely: its size must not follow the canvas, or resizing the canvas to the scene
+   (ResizeObserver in robot_view.py) would grow both a few pixels per frame. Its template sets position: relative. */
+.sp-view > .sp-scene { position: absolute !important; inset: 0; }
+.sp-scene > canvas { display: block; }
 .sp-loading { position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column; gap: 8px;
               align-items: center; justify-content: center; background: var(--wg-sunken); color: var(--wg-muted); }
 .sp-ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -53,17 +90,17 @@ CSS = """
            border-top: 1px solid var(--wg-divider); padding-top: 4px; }
 .sp-jrow:first-child { border-top: none; padding-top: 0; }
 .sp-jname { grid-row: 1 / span 2; display: flex; flex-direction: column; align-items: center; gap: 2px; }
-.sp-jnum { font-size: 17px; font-weight: 600; line-height: 1.1; }
-.sp-jname kbd { font-size: 11px; padding: 0 5px; color: var(--wg-muted); }
+.sp-jnum { font-size: var(--wg-fs-lg); font-weight: 600; line-height: 1.1; }
+.sp-jname kbd { font-size: calc(11px * var(--wg-text-scale)); padding: 0 5px; color: var(--wg-muted); }
 .sp-jpos { display: grid; grid-template-columns: 36px minmax(0, 1fr) 36px; gap: 8px; align-items: center;
-           font-size: 12px; color: var(--wg-muted); font-variant-numeric: tabular-nums; }
+           font-size: var(--wg-fs-xs); color: var(--wg-muted); font-variant-numeric: tabular-nums; }
 .sp-jpos > :first-child { text-align: right; }
 .sp-limit { height: 8px; border-radius: 4px; position: relative; border: 1px solid var(--wg-divider);
             background: linear-gradient(90deg, var(--wg-warning-soft) 0 6%, var(--wg-sunken) 6% 94%,
                                         var(--wg-warning-soft) 94%); }
 .sp-limit-mark { position: absolute; top: -5px; width: 6px; height: 16px; margin-left: -3px; border-radius: 3px;
                  background: var(--wg-text); }
-.sp-jangle { font-size: 17px; font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }
+.sp-jangle { font-size: var(--wg-fs-lg); font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }
 .sp-jrow .sp-slider { grid-column: 2 / span 2; }
 
 /* spring-return velocity slider (components/jog_slider.js) */
@@ -76,7 +113,8 @@ CSS = """
 .sp-slider-fill.sp-neg { background: var(--wg-warning); }
 .sp-slider-zero { position: absolute; left: 50%; top: 15%; bottom: 15%; width: 2px; margin-left: -1px;
                   background: var(--wg-subtle); }
-.sp-slider-sign { position: absolute; top: 50%; transform: translateY(-50%); font-size: 17px; font-weight: 600;
+.sp-slider-sign { position: absolute; top: 50%; transform: translateY(-50%); font-size: var(--wg-fs-lg);
+                  font-weight: 600;
                   color: var(--wg-subtle); }
 .sp-minus { left: 6px; } .sp-plus { right: 6px; }
 .sp-slider-thumb { position: absolute; top: 50%; width: 44px; height: 32px; margin: -16px 0 0 -22px; border-radius: 8px;
@@ -96,7 +134,7 @@ CSS = """
 .sp-pad-hline, .sp-pad-vline { position: absolute; background: var(--wg-border); }
 .sp-pad-hline { left: 14px; right: 14px; top: 50%; height: 2px; }
 .sp-pad-vline { top: 14px; bottom: 14px; left: 50%; width: 2px; }
-.sp-pad-label { position: absolute; font-size: 15px; font-weight: 600; color: var(--wg-muted); }
+.sp-pad-label { position: absolute; font-size: var(--wg-fs); font-weight: 600; color: var(--wg-muted); }
 .sp-left { left: 10px; top: 50%; transform: translateY(-50%); }
 .sp-right { right: 10px; top: 50%; transform: translateY(-50%); }
 .sp-up { top: 8px; left: 50%; transform: translateX(-50%); }
@@ -106,16 +144,34 @@ CSS = """
 .sp-pad.sp-active .sp-puck { background: var(--wg-primary); border-color: var(--wg-primary); }
 .sp-rot { display: grid; grid-template-columns: 32px minmax(0, 1fr); align-items: center; column-gap: 8px;
           height: 44px; }
-.sp-rot-label { font-size: 15px; font-weight: 600; }
+.sp-rot-label { font-size: var(--wg-fs); font-weight: 600; }
 
 @media (max-width: 1100px) {
-  .sp-main { grid-template-columns: minmax(0, 1fr); height: auto; min-height: 0; }
-  .sp-cart { height: 600px; } .sp-robot { height: 420px; } .sp-joints { height: 640px; }
+  /* one column: only the control of the active mode, the robot below it (scrolling). The splitter wrappers are
+     dissolved (display: contents), so the three panels are items of one column and can be ordered and hidden. */
+  .sp-main { height: auto; min-height: 0; }
+  .sp-outer.q-splitter--vertical { flex-direction: column; height: auto; gap: var(--wg-space); }
+  .sp-outer > .q-splitter__panel, .sp-inner, .sp-inner > .q-splitter__panel { display: contents; }
+  .sp-split > .q-splitter__separator { display: none; }
+  .wg-panel.sp-panel { flex: none; }
+  .sp-cart { height: 600px; } .sp-robot { height: 420px; order: 2; } .sp-joints { height: 640px; }
+  .sp-main.sp-m-joint .sp-cart, .sp-main.sp-m-twist .sp-joints { display: none; }
 }
 @media (max-width: 720px) {  /* mode and STOP in one row, speed below */
   .sp-bar .wg-stop { margin-left: auto; padding: 0 20px; }
   .sp-mode .q-btn { padding: 0 16px; }
   .sp-speed { order: 3; flex-basis: 100%; }
+}
+"""
+
+# The footer (the action bar) is 77 px high, more when it wraps (narrow) or with a larger text size: measured, as
+# --sp-bar-space, for the height of the panels
+BAR_JS = """
+const footer = document.querySelector(".q-footer.wg-footer");
+if (footer && !footer.sp_observer) {
+  footer.sp_observer = new ResizeObserver(() =>
+    document.documentElement.style.setProperty("--sp-bar-space", footer.offsetHeight + "px"));
+  footer.sp_observer.observe(footer);
 }
 """
 
@@ -135,6 +191,7 @@ class PendantPage:
         self._chips = {}
         self.dark = bool(frame.dark.value)  # corrected by _sync_theme when the theme follows the system
         self.view = None
+        self._split = [100 / 3, 50]  # [%] of the two splitters: kept when the page is rebuilt after a reconnect
         ui.add_css(CSS)
         ui.add_body_html(KEYBOARD_LOCK_JS)
         self.keys = KeyJog(7, on_jog=self._jog_key, on_stop=self.stop)
@@ -144,7 +201,7 @@ class PendantPage:
             self.states_chip = ui.element("div")
             self.crosstalk_chip = ui.element("button").on("click", self._show_crosstalk)
         self.main = ui.element("div").classes("sp-main")
-        with ui.context.client.content:  # below the page content, full width
+        with frame.footer:  # the action bar is the footer
             self.bar = ui.element("div").classes("wg-actionbar sp-bar")
 
         self._add_shortcuts()
@@ -152,6 +209,7 @@ class PendantPage:
         ui.timer(0.1, self._tick)
         ui.timer(0.5, self._update_status)
         ui.timer(0.5, self._sync_theme)
+        ui.timer(0.1, lambda: ui.run_javascript(BAR_JS), once=True)
 
     @property
     def node(self):
@@ -174,14 +232,31 @@ class PendantPage:
                     ui.label("The controls come back when the new connection is up.").classes("wg-hint")
             return
         with self.main:
-            self._cartesian_panel(c)
-            self._robot_panel(c)
-            self._joints_panel(c)
+            outer = self._splitter(0, "sp-outer", limits=(15, 60))
+            with outer.before:
+                self._cartesian_panel(c)
+            with outer.after:
+                inner = self._splitter(1, "sp-inner", limits=(20, 80))
+                with inner.before:
+                    self._robot_panel(c)
+                with inner.after:
+                    self._joints_panel(c)
         with self.bar:
             self._action_bar(c)
         self._build_rows(c)
         self._refresh_labels(c)
         self._show_mode(c)
+
+    def _splitter(self, index, classes, limits):
+        """Side-by-side splitter (value: width of the left part [%]); the handle sits in the gap of the panels."""
+        splitter = ui.splitter(
+            value=self._split[index],
+            limits=limits,
+            on_change=lambda e: self._split.__setitem__(index, e.value),
+        ).classes("sp-split " + classes)
+        with splitter.separator:
+            ui.icon("sym_o_drag_indicator", size="20px").tooltip("Drag to resize the panels")
+        return splitter
 
     def _overlay(self, text, mode):
         with ui.element("div").classes("sp-overlay") as overlay:
@@ -340,6 +415,9 @@ class PendantPage:
 
     def _show_mode(self, c):
         self.mode_toggle.value = c.mode
+        # one-column layout (narrow browsers): only the active control is shown (CSS)
+        joint = c.mode == JOINT
+        self.main.classes(add="sp-m-joint" if joint else "sp-m-twist", remove="sp-m-twist" if joint else "sp-m-joint")
         self.cart_overlay.set_visibility(c.mode != TWIST)
         self.joint_overlay.set_visibility(c.mode != JOINT)
         self.view_hint.set_text(

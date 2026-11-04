@@ -35,17 +35,22 @@ Then open the address it prints (the first free port from 8080, or the robot PC'
 | `--host` | `0.0.0.0` | `127.0.0.1`: only reachable from this computer |
 | `--domain-id` | saved, else `ROS_DOMAIN_ID` | ROS domain of the webgui's node |
 | `--namespace` | saved, else none | ROS namespace of the node |
+| `--node-name` | saved, else `servo_pendant_webgui` | ROS name of the node |
 
 ROS parameters: `--ros-args -p name:=value`, see [Parameters](#parameters). The web server options used to be the ROS
 parameters `host` and `port`; they are command line options now.
 
 ## Panel
 
+The page fills the browser width. Cartesian, robot and joints start a third of the width each. Drag the handle
+(⋮⋮) in the gap between two panels to resize them; the sizes are kept until the page is reloaded. Below 1100 px one column is
+shown: the control of the active mode (Cartesian or joints; switch with the action bar), and the robot below it.
+
 - **Header**: the ROS connection (click: settings), Servo's state (mode accepted, rejected or not available), the age
   of the joint states, and a red chip when more than one node publishes `/joint_states` (cross-talk, e.g. another
   robot in the same ROS domain; click it for the node names). Joint states with a timestamp older than the newest one
   received are ignored.
-- **Action bar (bottom)**:
+- **Action bar (the footer, always at the bottom of the window)**:
   - **Cartesian / Joint** switches the active side and Servo's command type (`/servo_node/switch_command_type`).
     Tapping the dimmed side does the same. Servo is switched again automatically whenever it (re)appears.
   - **Speed** scales every command (default 30 %).
@@ -71,18 +76,21 @@ The response is quadratic: fine motion near the centre, full speed at the edge.
 
 ## Settings
 
-Top right, or <kbd>Ctrl</kbd>+<kbd>,</kbd>:
+An overlay with tabs, from the gear top right, the ROS chip, or <kbd>Ctrl</kbd>+<kbd>,</kbd>:
 
-- **Appearance** (this browser): light, dark or system theme. For a larger or smaller panel use the browser zoom
-  (<kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>-</kbd>).
-- **ROS connection** (the whole webgui): domain ID, namespace, discovery range, static peers. *Apply and reconnect*
-  restarts the webgui's ROS node with the new settings; they are saved in `~/.ros/servo_pendant_webgui/settings.json`.
-- **Frames and joints**: base and tool frame (links of the URDF, or any name) and the hidden joints (regular
-  expressions). Applied at once to every open page; held inputs are released.
-- **MoveIt Servo**: Servo's parameters (`moveit_servo.*`: move group, command out topic, ...), read from its node
-  (`/servo_node`, from `switch_command_type_service`). Read-only.
-- **Parameters**: all node parameters, changed live (same as `ros2 param set`). Topics and the service are read-only.
-- **About**: node name, ROS distribution, middleware, web address.
+- **ROS** (the whole webgui): domain ID, discovery range, static peers, node name, namespace. *Apply and restart*
+  restarts the webgui's ROS node with them; they are saved in `~/.ros/servo_pendant_webgui/settings.json`.
+- **Web GUI** (the whole webgui, applied at once):
+  - **Frames and joints**: the joint states topic (the JointState topics found, or any name, e.g.
+    `/isaac_joint_states`), base and tool frame (links of the URDF, or any name) and the hidden joints (regular
+    expressions). Applied at once to every open page; held inputs are released.
+  - **MoveIt Servo**: Servo's parameters (`moveit_servo.*`: move group, command out topic, ...), read from its node
+    (`/servo_node`, from `switch_command_type_service`). Read-only.
+  - **Parameters**: all node parameters, changed live (same as `ros2 param set`). The other topics and the service
+    are read-only.
+- **Appearance** (this browser): light, dark or system theme, text size and spacing (`?text=larger` in the address
+  for a kiosk). Browser zoom (<kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>-</kbd>) works too.
+- **About**: what the pendant is, its version and address, start options, ROS and software facts.
 
 Keyboard jogging is off while the settings are open.
 
@@ -128,6 +136,6 @@ explicitly. After a release, three zero commands are sent, then the stream stops
 | `publish_rate` [Hz], `input_timeout` [s] | `50`, `0.3` |
 | `exclude_joints` (regexes) | `['.*finger.*']` |
 
-The frames, speeds, `publish_rate`, `input_timeout` and `exclude_joints` can be changed while the node runs, in the
-settings or with `ros2 param set` (all held inputs are released on a change). The topics and the service are
-read-only: set them at launch.
+`joint_states_topic`, the frames, speeds, `publish_rate`, `input_timeout` and `exclude_joints` can be changed while the
+node runs, in the settings or with `ros2 param set` (all held inputs are released on a change; a new joint states
+topic starts the joint list over). The other topics and the service are read-only: set them at launch.

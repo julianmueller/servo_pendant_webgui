@@ -3,9 +3,10 @@ The ROS side of a webgui: its own rclpy context (domain ID, discovery), the node
 
 Shared webgui shell (from the nicegui-ros2-webgui skill): keep it identical across the webgui packages.
 
-The domain ID and the discovery settings are fixed when a context is created, so changing them creates a new
-context and a new node while the web server keeps running. Pages must therefore never keep the node: they read
-`bridge.node` whenever they need it (it is None while reconnecting).
+The domain ID and the discovery settings are fixed when a context is created, and the node name and namespace when
+a node is, so changing any of them (Settings > ROS) creates a new context and a new node while the web server keeps
+running. Pages must therefore never keep the node: they read `bridge.node` whenever they need it (it is None while
+reconnecting).
 """
 
 import os
@@ -21,8 +22,8 @@ from rclpy.utilities import get_rmw_implementation_identifier
 class RosBridge:
     def __init__(self, node_factory, connection, ros_args):
         """
-        node_factory(context=..., namespace=..., parameter_overrides=...) creates the app's node (a Node subclass
-        that passes **kwargs on); ros_args: sys.argv (for --ros-args).
+        node_factory(context=..., namespace=..., parameter_overrides=..., cli_args=...) creates the app's node (a
+        Node subclass that passes **kwargs on); ros_args: sys.argv (for --ros-args).
         """
         self._factory = node_factory
         self._ros_args = ros_args
@@ -52,8 +53,17 @@ class RosBridge:
             domain_id=c.domain_id,
             signal_handler_options=SignalHandlerOptions.NO,
         )
-        # parameters changed while the old node ran are kept
-        node = self._factory(context=context, namespace=c.namespace or None, parameter_overrides=list(parameters))
+        kwargs = {}
+        if c.node_name:  # a remap of this node only, so the node class keeps its own default name
+            kwargs["cli_args"] = ["--ros-args", "-r", f"__node:={c.node_name}"]
+        try:
+            # parameters changed while the old node ran are kept
+            node = self._factory(
+                context=context, namespace=c.namespace or None, parameter_overrides=list(parameters), **kwargs
+            )
+        except Exception:
+            rclpy.try_shutdown(context=context)
+            raise
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
         thread = threading.Thread(target=self._spin, args=(executor, node), name="ros_spin", daemon=True)
@@ -61,7 +71,9 @@ class RosBridge:
         thread.start()
         self.node = node
         self.generation += 1
-        node.get_logger().info(f"ROS domain {c.domain_id}, discovery {c.discovery_range}")
+        node.get_logger().info(
+            f"{node.get_fully_qualified_name()} in ROS domain {c.domain_id}, discovery {c.discovery_range}"
+        )
 
     @staticmethod
     def _spin(executor, node):
@@ -89,24 +101,34 @@ class RosBridge:
         self._context = self._executor = self._thread = None
 
     def reconnect(self, connection):
-        """New context with other settings. Blocking (about a second): call it with `await run.io_bound(...)`."""
+        """
+        Restarts the node with other settings (new context). Blocking (about a second): call it with
+        `await run.io_bound(...)`.
+        """
         with self._lock:
             parameters = []
             if self.node is not None:
                 parameters = [p for p in self.node.get_parameters_by_prefix("").values() if p.name != "use_sim_time"]
+            old = self.connection
             self._stop()
             self.connection = connection
-            self._start(parameters)
+            try:
+                self._start(parameters)
+            except Exception:  # e.g. a name the middleware refuses: back to the node that worked
+                self.connection = old
+                self._start(parameters)
+                raise
 
     def shutdown(self):
         with self._lock:
             self._stop()
 
     def info(self):
-        """Facts about the connection for the settings (name -> text)."""
+        """Facts about the ROS side for Settings > About (name -> text)."""
         node = self.node
         return {
-            "Node": node.get_fully_qualified_name() if node else "reconnecting",
+            "Node": node.get_fully_qualified_name() if node else "restarting",
+            "Domain ID": str(self.connection.domain_id),
             "ROS distribution": os.environ.get("ROS_DISTRO", "unknown"),
             "Middleware": get_rmw_implementation_identifier(),
         }

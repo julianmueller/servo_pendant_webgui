@@ -1,5 +1,6 @@
 """3D view of the robot: URDF visuals, joint direction rings (joint mode) and the commanded tool motion (Cartesian)."""
 
+import contextlib
 import math
 
 import numpy as np
@@ -53,11 +54,9 @@ class RobotView:
         self.c = commander
         self.dark = dark
         self.colors = view_colors(dark)
-        self.scene = ui.scene(grid=False, background_color=self.colors["background"]).classes(
-            "w-full h-full"
-        )
+        self.scene = ui.scene(grid=False, background_color=self.colors["background"]).classes("sp-scene")
         ui.timer(
-            0.5, self.reset_camera, once=True
+            0.5, self._start, once=True
         )  # the camera can only be moved once the scene is live
         self.model = None
         self.visual_objects = []  # (object, link, 4x4 visual origin, is_cylinder)
@@ -163,6 +162,14 @@ class RobotView:
         except TimeoutError:
             return True
         return bool(pending)
+
+    def _start(self):
+        self.reset_camera()
+        # three.js only follows window resizes: follow the panel size too (splitters, one-column layout)
+        ui.run_javascript(
+            f"const s = getElement({self.scene.id}); if (s && !s.sp_resize) "
+            "{ s.sp_resize = new ResizeObserver(() => s.resize()); s.sp_resize.observe(s.$el); }"
+        )
 
     def reset_camera(self):
         self.scene.move_camera(
@@ -283,11 +290,25 @@ class RobotView:
             self._build(model)
         # One message per update instead of one per move/rotate: keeps NiceGUI's reconnect history from being
         # flooded (replaying it showed old poses = glitches) and applies all poses in the same browser frame.
-        with self.scene._batch_calls():  # pylint: disable=protected-access
+        # Scene._batch_calls only exists in newer NiceGUI (3.17 has it, 3.3 does not): send unbatched otherwise.
+        batch = getattr(self.scene, "_batch_calls", None)
+        with batch() if batch else contextlib.nullcontext():
             self._update(model)
 
+    def _relative_to_base(self, links, joints):
+        """Re-express the URDF-root transforms in the base frame of the settings, so that it sits at the scene
+        origin (floor, grid, origin axes and camera target). Unchanged if the base frame is not a URDF link."""
+        base = links.get(self.c.base_frame)
+        if base is None:
+            return links, joints
+        inv = np.linalg.inv(base)
+        R, t = inv[:3, :3], inv[:3, 3]
+        links = {name: inv @ T for name, T in links.items()}
+        joints = {name: (R @ c + t, R @ a) for name, (c, a) in joints.items()}
+        return links, joints
+
     def _update(self, model):
-        links, joints = model.forward(self.c.snapshot_positions())
+        links, joints = self._relative_to_base(*model.forward(self.c.snapshot_positions()))
         inputs = self.c.active_inputs()
         joint_mode = self.c.mode == JOINT
 

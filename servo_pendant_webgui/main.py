@@ -18,6 +18,8 @@ from servo_pendant_webgui.shell.ros_bridge import RosBridge
 PACKAGE = "servo_pendant_webgui"
 TITLE = "Servo pendant"
 ICON = "sym_o_precision_manufacturing"  # Material Symbols name, also used in the header
+# one sentence, shown in Settings > About
+DESCRIPTION = "Jog the robot with MoveIt Servo, in joint or Cartesian mode, from a touch screen or the keyboard."
 
 
 def main():
@@ -31,7 +33,9 @@ def main():
 
     @ui.page("/")
     def index(request: Request):
-        frame = AppFrame(bridge, store, request, TITLE, ICON, extra_settings=SETTINGS_SECTIONS)
+        frame = AppFrame(
+            bridge, store, request, TITLE, ICON, extra_settings=SETTINGS_SECTIONS, description=DESCRIPTION
+        )
         with frame.content:
             PendantPage(frame)
 

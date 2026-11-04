@@ -13,6 +13,7 @@ import numpy as np
 from rclpy.node import Node
 from rclpy.parameter import Parameter, parameter_value_to_python
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.validate_topic_name import validate_topic_name
 
 from control_msgs.msg import JointJog
 from geometry_msgs.msg import TwistStamped
@@ -40,6 +41,7 @@ AXIS_NAMES = "XYZ"
 # Parameters that can be changed while the node runs (settings panel or `ros2 param set`). All others are read-only:
 # they are set at launch.
 LIVE_PARAMETERS = (
+    "joint_states_topic",
     "base_frame",
     "tool_frame",
     "max_linear_speed",
@@ -140,7 +142,7 @@ class ServoCommander(Node):
 
         self._twist_pub = self.create_publisher(TwistStamped, val("twist_topic"), 10)
         self._jog_pub = self.create_publisher(JointJog, val("joint_jog_topic"), 10)
-        self.create_subscription(
+        self._joint_states_sub = self.create_subscription(
             JointState, self._joint_states_topic, self._on_joint_states, 10
         )
         latched = QoSProfile(
@@ -347,8 +349,13 @@ class ServoCommander(Node):
             return SetParametersResult(successful=False, reason=reason)
 
         for prm in params:
-            if prm.name in ("base_frame", "tool_frame") and not prm.value.strip():
+            if prm.name in ("base_frame", "tool_frame", "joint_states_topic") and not prm.value.strip():
                 return reject(f"{prm.name} must not be empty")
+            if prm.name == "joint_states_topic":
+                try:
+                    validate_topic_name(prm.value.strip())
+                except Exception as e:  # InvalidTopicNameException
+                    return reject(f"invalid topic name {prm.value!r}: {e}")
             if prm.name in _POSITIVE and not prm.value > 0.0:
                 return reject(f"{prm.name} must be > 0")
             if prm.name == "publish_rate" and prm.value > 1000.0:
@@ -366,7 +373,9 @@ class ServoCommander(Node):
         self.release_all()
         for prm in params:
             name, value = prm.name, prm.value
-            if name == "base_frame":
+            if name == "joint_states_topic":
+                self._resubscribe_joint_states(value.strip())
+            elif name == "base_frame":
                 self.base_frame = value.strip()
             elif name == "tool_frame":
                 self.tool_frame = value.strip()
@@ -386,6 +395,30 @@ class ServoCommander(Node):
                     self.joint_names = [
                         n for n in self._seen_joints if not self._excluded(n)
                     ]
+
+    def _resubscribe_joint_states(self, topic):
+        """Switch to another joint states topic. The joints start over: the new topic may be another robot."""
+        if topic == self._joint_states_topic:
+            return
+        self.destroy_subscription(self._joint_states_sub)
+        with self._lock:
+            self._joint_states_topic = topic
+            self.positions, self._joint_stamps = {}, {}
+            self._seen_joints, self.joint_names = [], []
+            self._joint_states_time = 0.0
+        self.joint_states_warning = ""
+        self._joint_states_sub = self.create_subscription(
+            JointState, topic, self._on_joint_states, 10
+        )
+        self.get_logger().info(f"Joint states from {topic}")
+
+    def joint_state_topics(self):
+        """Topics with sensor_msgs/JointState messages, for the settings."""
+        return sorted(
+            name
+            for name, types in self.get_topic_names_and_types()
+            if "sensor_msgs/msg/JointState" in types
+        )
 
     def _excluded(self, joint):
         return any(r.fullmatch(joint) for r in self._exclude)

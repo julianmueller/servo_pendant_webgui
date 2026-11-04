@@ -7,6 +7,7 @@ Shared webgui shell (from the nicegui-ros2-webgui skill): keep it identical acro
 import argparse
 import json
 import os
+import re
 import socket
 import sys
 from dataclasses import asdict, dataclass, fields
@@ -22,14 +23,17 @@ DISCOVERY_RANGES = {
     "SYSTEM_DEFAULT": "Middleware default",
 }
 MAX_DOMAIN_ID = 232  # rmw limit; 0..101 are safe on every OS
+NODE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+NAMESPACE_RE = re.compile(r"^(/[A-Za-z_][A-Za-z0-9_]*)+$")
 
 
 @dataclass
 class RosConnection:
-    """What the webgui's ROS context is created with. Changing it means a new context (see RosBridge.reconnect)."""
+    """What the webgui's ROS context and node are created with. Changing it restarts the node (RosBridge.reconnect)."""
 
     domain_id: int = 0
     namespace: str = ""
+    node_name: str = ""  # empty: the name the node class gives itself (the package name)
     discovery_range: str = "SUBNET"
     static_peers: str = ""  # hosts separated by ";" (ROS_STATIC_PEERS)
 
@@ -54,8 +58,10 @@ class RosConnection:
             return f"The domain ID must be between 0 and {MAX_DOMAIN_ID}."
         if self.discovery_range not in DISCOVERY_RANGES:
             return f"Unknown discovery range {self.discovery_range}."
-        if self.namespace and not self.namespace.replace("/", "").replace("_", "").isalnum():
-            return "The namespace may only contain letters, digits, '_' and '/'."
+        if self.namespace and not NAMESPACE_RE.match("/" + self.namespace.strip("/")):
+            return "The namespace may only contain letters, digits, '_' and '/', and no part may start with a digit."
+        if self.node_name and not NODE_NAME_RE.match(self.node_name):
+            return "The node name may only contain letters, digits and '_', and may not start with a digit."
         return None
 
 
@@ -66,6 +72,7 @@ class SettingsStore:
     """
 
     def __init__(self, package):
+        self.package = package
         self.path = Path(os.environ.get("ROS_HOME", "~/.ros")).expanduser() / package / "settings.json"
 
     def _read(self):
@@ -84,6 +91,8 @@ class SettingsStore:
             connection.domain_id = options.domain_id
         if options.namespace is not None:
             connection.namespace = options.namespace
+        if options.node_name is not None:
+            connection.node_name = options.node_name
         if connection.validate():
             connection = RosConnection.from_environment()
         return connection
@@ -110,6 +119,9 @@ def parse_args(argv, description):
     )
     parser.add_argument("--domain-id", type=int, default=None, help="ROS domain ID (default: saved, else ROS_DOMAIN_ID)")
     parser.add_argument("--namespace", default=None, help="ROS namespace of the node (default: saved, else none)")
+    parser.add_argument(
+        "--node-name", default=None, help="ROS name of the node (default: saved, else the package name)"
+    )
     return parser.parse_args(remove_ros_args(argv)[1:])
 
 

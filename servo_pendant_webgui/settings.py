@@ -1,6 +1,7 @@
 """
-App sections of the settings drawer (the shell adds theme, ROS connection, parameters and about): the command frames
-and hidden joints with editors the generic parameter list has no control for, and MoveIt Servo's parameters.
+App sections of Settings > Web GUI (the shell adds the node parameters and the ROS, Appearance and About tabs): the
+joint states topic, the command frames and hidden joints with editors the generic parameter list has no control for,
+and MoveIt Servo's parameters.
 """
 
 import asyncio
@@ -46,6 +47,17 @@ def robot_control_section(panel):
     if node is None:
         return
     panel.section("Frames and joints", "Applies at once to every open page. Held inputs are released.")
+    topic = node.get_parameter("joint_states_topic").value
+    topics = node.joint_state_topics()
+    with panel.row("Joint states topic", "sensor_msgs/JointState of the robot (e.g. /isaac_joint_states)",
+                   "joint_states_topic"):
+        ui.select(
+            topics if topic in topics else topics + [topic],
+            value=topic,
+            with_input=True,
+            new_value_mode="add-unique",
+            on_change=lambda e: _apply(panel.bridge.node, "joint_states_topic", e.value),
+        ).props("outlined")
     links = list(node.model.links) if node.model is not None else []
     for name, title, description in (
         ("base_frame", "Base frame", "Frame of the commands in base mode"),
@@ -84,7 +96,7 @@ def servo_section(panel):
             if not box.is_deleted:
                 status.set_text(f"Not available: {str(e) or 'no answer'}. Start Servo with launch_servo:=true.")
             return
-        if box.is_deleted:  # the drawer was closed or rebuilt meanwhile
+        if box.is_deleted:  # the settings were closed or rebuilt meanwhile
             return
         box.clear()
         with box:
