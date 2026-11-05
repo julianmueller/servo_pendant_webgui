@@ -1,17 +1,32 @@
-"""3D view of the robot: URDF visuals, joint direction rings (joint mode) and the commanded tool motion (Cartesian)."""
+"""
+3D view of the robot: URDF visuals, joint direction rings (joint mode) and the jog directions at the tool (Cartesian).
+
+Rings and arrows can be picked (components/scene_pick.js): hovering or tapping one lights it up and reports it to the
+page, which highlights the control that drives it.
+"""
 
 import contextlib
+import json
 import math
 
 import numpy as np
 from nicegui import ui
 
 from servo_pendant_webgui.mesh_cache import glb_url
-from servo_pendant_webgui.ros_node import JOINT
+from servo_pendant_webgui.ros_node import AXIS_NAMES, JOINT
 from servo_pendant_webgui.shell import theme
 
 # Links without a material in the URDF
 LINK_COLOR = theme.LIGHT["border"]
+
+# Keys of the six Cartesian directions ('x+', 'x-', …), as reported by picking
+AXIS_KEYS = [(f"{name.lower()}{'+' if sign > 0 else '-'}", i, sign) for i, name in enumerate(AXIS_NAMES)
+             for sign in (1, -1)]
+
+LABEL_STYLE = (
+    "font: 600 12px var(--wg-font); color: var(--wg-text); padding: 0 4px; border-radius: 4px; "
+    "background: color-mix(in srgb, var(--wg-surface) 82%, transparent)"
+)
 
 
 def view_colors(dark):
@@ -45,32 +60,47 @@ _Y_TO_Z = np.array(
 
 
 class RobotView:
-    """Robot from the URDF visuals; rings show each joint's positive direction, the moving one is coloured."""
+    """
+    Robot from the URDF visuals; rings show each joint's positive direction, arrows the six Cartesian directions.
+
+    The moving one is coloured, as is the one in `highlight` (picked in the view or by the page).
+    """
 
     RING_RADIUS, RING_TUBE, RING_LENGTH = 0.103, 0.006, 1.5 * math.pi
+    # Cartesian arrows along the local y axis of their group: gap at the tool, shaft, head [m]
+    ARROW_GAP, ARROW_SHAFT, ARROW_HEAD, ARROW_RADIUS, ARROW_HEAD_RADIUS = 0.02, 0.13, 0.04, 0.006, 0.017
+    IDLE_OPACITY = 0.3  # of the arrows nobody commands or points at
     FLOOR_SIZE, FLOOR_THICKNESS = 1.6, 0.01
 
-    def __init__(self, commander, dark=False):
+    def __init__(self, commander, dark=False, on_pick=None):
+        """
+        Build the scene; the robot follows with the first update that has a model.
+
+        on_pick(kind, key): kind 'hover' (key None: nothing under the mouse) or 'press'; key 'j:<joint>' for a joint
+        ring, 'x+' … 'z-' for a Cartesian arrow.
+        """
         self.c = commander
         self.dark = dark
         self.colors = view_colors(dark)
+        self.on_pick = on_pick
+        self.highlight = None  # key of the ring or arrow shown solid (hovered, or picked a moment ago)
         self.scene = ui.scene(grid=False, background_color=self.colors["background"]).classes("sp-scene")
+        self.scene.on("pick3d", self._handle_pick)
+        self.scene.on("init", self._install_picking)  # again after a remount (e.g. a lost WebGL context)
         ui.timer(
             0.5, self._start, once=True
         )  # the camera can only be moved once the scene is live
         self.model = None
         self.visual_objects = []  # (object, link, 4x4 visual origin, is_cylinder)
-        self.rings = {}  # joint -> (group, [parts], label)
+        self.rings = {}  # joint -> (group, [parts])
         self._sent = {}
         with self.scene:
             self._floor()
-            self.scene.axes_helper(0.2)
-            self.tool_axes = self.scene.axes_helper(0.1)
             self.tcp_ring, self.tcp_ring_parts = self._ring_group()
-            self.arrow = self.scene.cylinder(0.01, 0.01, 1.0, 12).material(self.colors["positive"])
-            self.arrow_head = self.scene.cylinder(0, 0.026, 0.06, 16).material(self.colors["positive"])
-        for obj in (self.tcp_ring, self.arrow, self.arrow_head):
-            obj.visible(False)
+            self.arrows = {key: self._arrow_group(i, sign) for key, i, sign in AXIS_KEYS}
+        self.tcp_ring.visible(False)
+        for group, _ in self.arrows.values():
+            group.visible(False)
 
     def _floor(self):
         """Solid floor slab (visible from above and below) with a 10 cm grid on top."""
@@ -92,7 +122,7 @@ class RobotView:
             line.material(self.colors["grid"])
 
     def set_dark(self, dark):
-        """Colours of the other theme. The rings follow with the next update."""
+        """Colours of the other theme. The rings and arrows follow with the next update."""
         if dark == self.dark:
             return
         self.dark, self.colors = dark, view_colors(dark)
@@ -104,8 +134,6 @@ class RobotView:
         self.floor.material(self.colors["floor"])
         for line in self.grid:
             line.material(self.colors["grid"])
-        self.arrow.material(self.colors["positive"])
-        self.arrow_head.material(self.colors["positive"])
 
     def _ring_group(self, label=None):
         """A 3D ring (tube arc + cone head) in the XY plane of a group, arrow head pointing to positive rotation."""
@@ -143,12 +171,51 @@ class RobotView:
                 .rotate_R(_align(tangent, 1).tolist())
             )
             if label is not None:
-                self.scene.text(
-                    label,
-                    "font: 600 12px var(--wg-font); color: var(--wg-text); padding: 0 4px; border-radius: 4px; "
-                    "background: color-mix(in srgb, var(--wg-surface) 82%, transparent)",
-                ).move(-(r + 0.04), 0.0, 0.0)
+                self.scene.text(label, LABEL_STYLE).move(-(r + 0.04), 0.0, 0.0)
         return group, parts
+
+    def _ring_outline(self):
+        """Return the outline of a ring in its group's frame, for picking: the arc and the head."""
+        r, end = self.RING_RADIUS, self.RING_LENGTH
+        points = [[r * math.cos(a), r * math.sin(a), 0.0] for a in np.linspace(0.0, end, 19)]
+        points.append([r * math.cos(end) - 0.048 * math.sin(end), r * math.sin(end) + 0.048 * math.cos(end), 0.0])
+        return points
+
+    def _arrow_group(self, axis, sign):
+        """Arrow (shaft + cone head + label) along the local y axis of a group; the group is turned onto the axis."""
+        gap, shaft, head = self.ARROW_GAP, self.ARROW_SHAFT, self.ARROW_HEAD
+        with self.scene.group() as group:
+            parts = [
+                self.scene.cylinder(self.ARROW_RADIUS, self.ARROW_RADIUS, shaft, 12).move(0, gap + shaft / 2, 0),
+                self.scene.cylinder(0, self.ARROW_HEAD_RADIUS, head, 16).move(0, gap + shaft + head / 2, 0),
+            ]
+            label = f"{'+' if sign > 0 else '-'}{AXIS_NAMES[axis]}"  # as on the pad
+            self.scene.text(label, LABEL_STYLE).move(0, gap + shaft + head + 0.025, 0)
+        return group, parts
+
+    def _arrow_outline(self):
+        """Return the outline of an arrow in its group's frame, for picking."""
+        return [[0.0, self.ARROW_GAP, 0.0], [0.0, self.ARROW_GAP + self.ARROW_SHAFT + self.ARROW_HEAD, 0.0]]
+
+    def _handle_pick(self, e):
+        args = e.args[0] if isinstance(e.args, list) and e.args else e.args or {}
+        kind, key = args.get("type"), args.get("key")
+        if kind in ("hover", "press") and self.on_pick is not None:
+            self.on_pick(kind, key)
+
+    def _install_picking(self, _=None):
+        """
+        Tell the browser what can be picked: every ring and arrow group with its outline (in the group's frame).
+
+        The rings and arrows are drawn over the robot, so the ones behind or inside it stay visible.
+        """
+        ring = self._ring_outline()
+        items = [{"id": group.id, "key": "j:" + name, "points": ring} for name, (group, _) in self.rings.items()]
+        arrow = self._arrow_outline()
+        items += [{"id": group.id, "key": key, "points": arrow} for key, (group, _) in self.arrows.items()]
+        groups = [*self.rings.values(), *self.arrows.values(), (self.tcp_ring, self.tcp_ring_parts)]
+        overlay = [part.id for _, parts in groups for part in parts]
+        ui.run_javascript(f"window.spScenePick?.install({self.scene.id}, {json.dumps(items)}, {json.dumps(overlay)})")
 
     async def loading(self):
         """True while the robot model is missing or its meshes are still loading in the browser."""
@@ -170,6 +237,7 @@ class RobotView:
             f"const s = getElement({self.scene.id}); if (s && !s.sp_resize) "
             "{ s.sp_resize = new ResizeObserver(() => s.resize()); s.sp_resize.observe(s.$el); }"
         )
+        self._install_picking()
 
     def reset_camera(self):
         self.scene.move_camera(
@@ -213,6 +281,7 @@ class RobotView:
                 if joint.type in ("revolute", "continuous") and joint.mimic is None:
                     self.rings[name] = self._ring_group(self._label(name))
         self.model = model
+        self._install_picking()
 
     def _label(self, name):
         names = list(self.c.joint_names)
@@ -262,6 +331,12 @@ class RobotView:
         if color is not None:
             obj.material(color, opacity)
 
+    def _paint(self, parts, key, color, opacity=1.0):
+        if self._sent.get(key + "c") != (color, opacity):
+            self._sent[key + "c"] = (color, opacity)
+            for part in parts:
+                part.material(color, opacity)
+
     _FLIP = np.diag(
         [1.0, -1.0, -1.0]
     )  # 180 deg about x: the arc runs the other way round, the head turns around
@@ -276,10 +351,7 @@ class RobotView:
             R=Rz if sign > 0 else Rz @ self._FLIP,
             visible=True,
         )
-        if self._sent.get(key + "c") != (color, opacity):
-            self._sent[key + "c"] = (color, opacity)
-            for part in parts:
-                part.material(color, opacity)
+        self._paint(parts, key, color, opacity)
 
     def update(self):
         model = self.c.model
@@ -297,7 +369,7 @@ class RobotView:
 
     def _relative_to_base(self, links, joints):
         """Re-express the URDF-root transforms in the base frame of the settings, so that it sits at the scene
-        origin (floor, grid, origin axes and camera target). Unchanged if the base frame is not a URDF link."""
+        origin (floor, grid and camera target). Unchanged if the base frame is not a URDF link."""
         base = links.get(self.c.base_frame)
         if base is None:
             return links, joints
@@ -319,7 +391,8 @@ class RobotView:
             R = T[:3, :3] @ _Y_TO_Z if is_cylinder else T[:3, :3]
             self._send(obj, f"v{i}", pos=T[:3, 3], R=R)
 
-        # joint mode: every joint's positive direction; the moving one coloured, its head in the direction of motion
+        # joint mode: every joint's positive direction; the moving one coloured, its head in the direction of motion,
+        # the highlighted one solid in the positive colour
         jog = self.c.joint_velocities(inputs) if joint_mode else {}
         for name, (group, parts) in self.rings.items():
             if not joint_mode or name not in joints:
@@ -328,63 +401,40 @@ class RobotView:
             center, axis = joints[name]
             v = jog.get(name, 0.0)
             if abs(v) > 1e-9:
-                self._place_ring(
-                    group,
-                    parts,
-                    name,
-                    center,
-                    axis,
-                    self.colors["positive" if v > 0 else "negative"],
-                    sign=v,
-                )
+                color, opacity, sign = self.colors["positive" if v > 0 else "negative"], 1.0, v
+            elif self.highlight == "j:" + name:
+                color, opacity, sign = self.colors["positive"], 1.0, 1
             else:
-                self._place_ring(
-                    group, parts, name, center, axis, self.colors["idle"], opacity=0.55
-                )
+                color, opacity, sign = self.colors["idle"], 0.55, 1
+            self._place_ring(group, parts, name, center, axis, color, opacity, sign)
 
-        # cartesian mode: arrow for the translation, ring for the rotation at the tool
+        # cartesian mode: the six directions of the command frame at the tool, see-through; the commanded and the
+        # highlighted ones solid. A ring at the tool for the commanded rotation.
         tool = links.get(self.c.tool_frame)
-        if tool is not None:
-            self._send(self.tool_axes, "tool_axes", pos=tool[:3, 3], R=tool[:3, :3])
-        arrow_shown = ring_shown = False
-        if not joint_mode and tool is not None:
+        cartesian = not joint_mode and tool is not None
+        ring_shown = False
+        if cartesian:
             linear, angular = self.c.cartesian_command(inputs)
             if self.c.frame == "tool":
                 to_world = tool[:3, :3]
             else:
                 base = links.get(self.c.base_frame)
                 to_world = base[:3, :3] if base is not None else np.eye(3)
-            lin_w, ang_w = to_world @ linear, to_world @ angular
             tcp = tool[:3, 3]
-            if np.linalg.norm(lin_w) > 1e-9:
-                d = lin_w / np.linalg.norm(lin_w)
-                length = 0.1 + 0.2 * min(
-                    1.0,
-                    np.linalg.norm(lin_w) / max(self.c.max_linear * self.c.speed, 1e-9),
-                )
-                self._send(
-                    self.arrow,
-                    "arrow",
-                    pos=tcp + d * length / 2,
-                    R=_align(d, 1),
-                    scale=(1, length, 1),
-                    visible=True,
-                )
-                self._send(
-                    self.arrow_head,
-                    "arrow_head",
-                    pos=tcp + d * (length + 0.03),
-                    R=_align(d, 1),
-                    visible=True,
-                )
-                arrow_shown = True
+            for key, i, sign in AXIS_KEYS:
+                group, parts = self.arrows[key]
+                self._send(group, key + "g", pos=tcp, R=_align(to_world[:, i] * sign, 1), visible=True)
+                solid = linear[i] * sign > 1e-9 or self.highlight == key
+                color = self.colors["positive" if sign > 0 else "negative"]
+                self._paint(parts, key, color, 1.0 if solid else self.IDLE_OPACITY)
+            ang_w = to_world @ angular
             if np.linalg.norm(ang_w) > 1e-9:
                 self._place_ring(
                     self.tcp_ring, self.tcp_ring_parts, "tcp", tcp, ang_w, self.colors["positive"]
                 )
                 ring_shown = True
-        if not arrow_shown:
-            self._send(self.arrow, "arrow", visible=False)
-            self._send(self.arrow_head, "arrow_head", visible=False)
+        else:
+            for key, (group, _) in self.arrows.items():
+                self._send(group, key + "g", visible=False)
         if not ring_shown:
             self._send(self.tcp_ring, "tcpg", visible=False)

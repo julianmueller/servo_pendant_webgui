@@ -18,7 +18,7 @@ from rclpy.validate_topic_name import validate_topic_name
 from control_msgs.msg import JointJog
 from geometry_msgs.msg import TwistStamped
 from moveit_msgs.srv import ServoCommandType
-from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
+from rcl_interfaces.msg import Log, ParameterDescriptor, SetParametersResult
 from rcl_interfaces.srv import GetParameters, ListParameters
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
@@ -38,10 +38,22 @@ PLANES = {
 }
 AXIS_NAMES = "XYZ"
 
+# Topics and services of the node: parameter -> ROS type (the settings offer the topics / services of this type)
+CONNECTIONS = {
+    "joint_states_topic": "sensor_msgs/msg/JointState",
+    "robot_description_topic": "std_msgs/msg/String",
+    "twist_topic": "geometry_msgs/msg/TwistStamped",
+    "joint_jog_topic": "control_msgs/msg/JointJog",
+    "switch_command_type_service": "moveit_msgs/srv/ServoCommandType",
+}
+
+# MoveIt Servo's warning for a command of another type than the one it was switched to
+SERVO_TYPE_WARNING = "Command type has not been set"
+
 # Parameters that can be changed while the node runs (settings panel or `ros2 param set`). All others are read-only:
 # they are set at launch.
 LIVE_PARAMETERS = (
-    "joint_states_topic",
+    *CONNECTIONS,
     "base_frame",
     "tool_frame",
     "max_linear_speed",
@@ -114,8 +126,6 @@ class ServoCommander(Node):
         self.max_joint = val("max_joint_speed")
         self.input_timeout = val("input_timeout")
         self._exclude = [re.compile(r) for r in val("exclude_joints")]
-        # MoveIt Servo's node, from its service name (its parameters, like the move group, are shown in the settings)
-        self.servo_node = val("switch_command_type_service").rsplit("/", 1)[0] or "/"
 
         self._lock = threading.Lock()
         self._inputs = {}  # key -> (value, monotonic time)
@@ -139,30 +149,29 @@ class ServoCommander(Node):
 
         self.servo_status = ("warn", "Waiting for Servo")  # (level ok / warn / bad, text) for the page
         self._servo_was_ready = False
+        # Servo accepts only commands of the type it was switched to (it has no service to ask for the current type),
+        # and other clients (nbv_planner's small steps) switch it for themselves. So the type is sent: when Servo
+        # (re)appears, on every mode button / key, whenever a jog starts, every second while jogging, and at once
+        # when Servo logs that it rejected a command for its type. The first commands wait for Servo's answer (at
+        # most type_pending_max seconds). It is not sent while idle: that would take Servo from the other clients.
+        self._type_confirmed_mode = None  # mode Servo last confirmed
+        self._type_sent = 0.0  # monotonic time of the last switch request
+        self._type_pending = False
+        self.type_pending_max = 0.5  # [s]
+        self.type_rejections = 0  # commands Servo rejected for their type (from its log), for the page
 
+        self._pub_lock = threading.Lock()  # the publishers are replaced when their topic parameter changes
         self._twist_pub = self.create_publisher(TwistStamped, val("twist_topic"), 10)
         self._jog_pub = self.create_publisher(JointJog, val("joint_jog_topic"), 10)
         self._joint_states_sub = self.create_subscription(
             JointState, self._joint_states_topic, self._on_joint_states, 10
         )
-        latched = QoSProfile(
-            depth=1,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            reliability=ReliabilityPolicy.RELIABLE,
-        )
-        self.create_subscription(
-            String, val("robot_description_topic"), self._on_robot_description, latched
-        )
-        self._switch_client = self.create_client(
-            ServoCommandType, val("switch_command_type_service")
-        )
-        servo = self.servo_node.rstrip("/")
-        self._servo_list_parameters = self.create_client(
-            ListParameters, f"{servo}/list_parameters"
-        )
-        self._servo_get_parameters = self.create_client(
-            GetParameters, f"{servo}/get_parameters"
-        )
+        self._description_generation = 0  # counts robot description topics, so a stale conversion is dropped
+        self._description_sub = self._subscribe_description(self.robot_description_topic)
+        self._switch_client = None
+        self._connect_servo(val("switch_command_type_service"))
+        # Servo's log, to notice at once when it rejects the commands because another client switched its type
+        self.create_subscription(Log, "/rosout", self._on_rosout, 100)
         self._publish_timer = self.create_timer(
             1.0 / val("publish_rate"), self._publish
         )
@@ -184,9 +193,31 @@ class ServoCommander(Node):
             self._inputs.clear()
 
     def set_mode(self, mode):
-        self.release_all()
-        self.mode = mode
-        self._send_command_type()
+        """Switches the mode, and Servo's command type with it. The same mode again sends the type again."""
+        if mode != self.mode:
+            jogging = self._idle_count < 3
+            self.release_all()
+            if jogging:
+                self._publish_stop()  # stop in the old mode's type before Servo is switched
+            self.mode = mode
+            self._idle_count = 3  # no idle zero commands in the new type before Servo knows it
+        self.send_command_type()
+
+    def _publish_stop(self):
+        """One zero command in the current mode's type: Servo stops at once instead of at its timeout."""
+        stamp = self.get_clock().now().to_msg()
+        with self._pub_lock:
+            if self.mode == JOINT:
+                msg = JointJog()
+                msg.header.stamp = stamp
+                msg.joint_names = list(self.joint_names)
+                msg.velocities = [0.0] * len(self.joint_names)
+                self._jog_pub.publish(msg)
+            else:
+                msg = TwistStamped()
+                msg.header.stamp = stamp
+                msg.header.frame_id = self.command_frame()
+                self._twist_pub.publish(msg)
 
     def set_speed(self, speed):
         self.speed = float(np.clip(speed, 0.0, 1.0))
@@ -275,7 +306,16 @@ class ServoCommander(Node):
             self._idle_count += 1
             self.last_command = "idle"
         else:
+            now = time.monotonic()
+            if self._idle_count >= 3 or now - self._type_sent > 1.0:
+                # a jog starts, or has been going on for a second: make sure Servo is in this mode's type (another
+                # client may have switched it meanwhile)
+                self.send_command_type()
             self._idle_count = 0
+            if self._type_pending and self._type_confirmed_mode != self.mode:
+                if now - self._type_sent < self.type_pending_max:
+                    return  # Servo has not confirmed the type yet: the command would only be rejected
+                self._type_pending = False  # no answer: send anyway, Servo may be switched already
 
         if self.mode == JOINT:
             msg = JointJog()
@@ -286,7 +326,8 @@ class ServoCommander(Node):
             ]
             msg.joint_names = names
             msg.velocities = [float(velocities.get(n, 0.0)) for n in names]
-            self._jog_pub.publish(msg)
+            with self._pub_lock:
+                self._jog_pub.publish(msg)
             if moving:
                 self.last_command = "joint jog: " + ", ".join(
                     f"{n} {v:+.2f} rad/s" for n, v in velocities.items()
@@ -301,7 +342,8 @@ class ServoCommander(Node):
             msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z = (
                 float(v) for v in angular
             )
-            self._twist_pub.publish(msg)
+            with self._pub_lock:
+                self._twist_pub.publish(msg)
             if moving:
                 self.last_command = (
                     f"twist [{msg.header.frame_id}]: v=({linear[0]:+.3f}, {linear[1]:+.3f}, {linear[2]:+.3f}) m/s  "
@@ -312,15 +354,45 @@ class ServoCommander(Node):
     #  Servo command type
     # ------------------------------------------------------------------ #
 
+    def _connect_servo(self, service):
+        """Clients of MoveIt Servo's node, found from its switch_command_type service."""
+        for client in (self._switch_client, getattr(self, "_servo_list_parameters", None),
+                       getattr(self, "_servo_get_parameters", None)):  # fmt: skip
+            if client is not None:
+                self.destroy_client(client)
+        # Servo's node (its parameters, like the move group, are shown in the settings)
+        self.servo_node = service.rsplit("/", 1)[0] or "/"
+        servo = self.servo_node.rstrip("/")
+        self._switch_client = self.create_client(ServoCommandType, service)
+        self._servo_list_parameters = self.create_client(ListParameters, f"{servo}/list_parameters")
+        self._servo_get_parameters = self.create_client(GetParameters, f"{servo}/get_parameters")
+        self._servo_was_ready = False  # _watch_servo sends the type as soon as the service is there
+        self._type_confirmed_mode = None
+        self.servo_status = ("warn", "Waiting for Servo")
+
     def _watch_servo(self):
         ready = self._switch_client.service_is_ready()
         if ready and not self._servo_was_ready:
-            self._send_command_type()  # (re)appeared: make Servo match the panel's mode
+            self.send_command_type()  # (re)appeared: make Servo match the panel's mode
         elif not ready:
             self.servo_status = ("warn", "Servo not available")
         self._servo_was_ready = ready
 
-    def _send_command_type(self):
+    def _on_rosout(self, msg):
+        """Servo rejected a command for its type: send the type again at once, if this node is jogging."""
+        # by the text only: Servo's logger name depends on its version (node name or moveit.ros.servo...), and a
+        # needless switch request is harmless
+        if SERVO_TYPE_WARNING not in msg.msg:
+            return
+        if self._idle_count >= 3:
+            return  # not jogging: the rejected command came from another client
+        self.type_rejections += 1
+        if time.monotonic() - self._type_sent > 0.2:
+            self.get_logger().warn("Servo rejected a command for its command type: switching it again")
+            self.send_command_type()
+
+    def send_command_type(self):
+        """Asks Servo to switch to the current mode's command type (asynchronously; servo_status shows the answer)."""
         if not self._switch_client.service_is_ready():
             self.servo_status = ("warn", "Servo not available")
             return
@@ -331,11 +403,15 @@ class ServoCommander(Node):
             else ServoCommandType.Request.TWIST
         )
         mode = self.mode
+        self._type_sent = time.monotonic()
+        self._type_pending = True
         future = self._switch_client.call_async(request)
 
         def done(f):
-            ok = f.result() is not None and f.result().success
+            ok = f.exception() is None and f.result() is not None and f.result().success
             name = MODE_NAMES[mode]
+            self._type_pending = False
+            self._type_confirmed_mode = mode if ok else None
             self.servo_status = ("ok", f"Servo: {name} mode") if ok else ("bad", f"Servo rejected {name} mode")
 
         future.add_done_callback(done)
@@ -349,13 +425,13 @@ class ServoCommander(Node):
             return SetParametersResult(successful=False, reason=reason)
 
         for prm in params:
-            if prm.name in ("base_frame", "tool_frame", "joint_states_topic") and not prm.value.strip():
+            if prm.name in ("base_frame", "tool_frame", *CONNECTIONS) and not prm.value.strip():
                 return reject(f"{prm.name} must not be empty")
-            if prm.name == "joint_states_topic":
+            if prm.name in CONNECTIONS:
                 try:
-                    validate_topic_name(prm.value.strip())
+                    validate_topic_name(prm.value.strip())  # service names follow the same rules
                 except Exception as e:  # InvalidTopicNameException
-                    return reject(f"invalid topic name {prm.value!r}: {e}")
+                    return reject(f"invalid name {prm.value!r}: {e}")
             if prm.name in _POSITIVE and not prm.value > 0.0:
                 return reject(f"{prm.name} must be > 0")
             if prm.name == "publish_rate" and prm.value > 1000.0:
@@ -375,6 +451,18 @@ class ServoCommander(Node):
             name, value = prm.name, prm.value
             if name == "joint_states_topic":
                 self._resubscribe_joint_states(value.strip())
+            elif name == "robot_description_topic":
+                self._resubscribe_description(value.strip())
+            elif name == "twist_topic":
+                with self._pub_lock:
+                    old, self._twist_pub = self._twist_pub, self.create_publisher(TwistStamped, value.strip(), 10)
+                self.destroy_publisher(old)
+            elif name == "joint_jog_topic":
+                with self._pub_lock:
+                    old, self._jog_pub = self._jog_pub, self.create_publisher(JointJog, value.strip(), 10)
+                self.destroy_publisher(old)
+            elif name == "switch_command_type_service":
+                self._connect_servo(value.strip())
             elif name == "base_frame":
                 self.base_frame = value.strip()
             elif name == "tool_frame":
@@ -412,13 +500,33 @@ class ServoCommander(Node):
         )
         self.get_logger().info(f"Joint states from {topic}")
 
-    def joint_state_topics(self):
-        """Topics with sensor_msgs/JointState messages, for the settings."""
-        return sorted(
-            name
-            for name, types in self.get_topic_names_and_types()
-            if "sensor_msgs/msg/JointState" in types
+    def _subscribe_description(self, topic):
+        latched = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
         )
+        generation = self._description_generation
+        return self.create_subscription(
+            String, topic, lambda msg: self._on_robot_description(msg, generation), latched
+        )
+
+    def _resubscribe_description(self, topic):
+        """Another robot description topic. The robot shown stays until the new description has arrived."""
+        if topic == self.robot_description_topic:
+            return
+        self.destroy_subscription(self._description_sub)
+        self._description_generation += 1
+        self.robot_description_topic = topic
+        self.model_status = f"Waiting for the robot description on {topic}"
+        self._description_sub = self._subscribe_description(topic)
+        self.get_logger().info(f"Robot description from {topic}")
+
+    def connection_names(self, parameter):
+        """Topics (or services) of the type of a CONNECTIONS parameter, for the settings."""
+        kind = CONNECTIONS[parameter]
+        found = self.get_service_names_and_types() if "/srv/" in kind else self.get_topic_names_and_types()
+        return sorted(name for name, types in found if kind in types)
 
     def _excluded(self, joint):
         return any(r.fullmatch(joint) for r in self._exclude)
@@ -485,7 +593,9 @@ class ServoCommander(Node):
                         self.joint_names.append(name)
             self._joint_states_time = time.monotonic()
 
-    def _on_robot_description(self, msg):
+    def _on_robot_description(self, msg, generation):
+        if generation != self._description_generation:
+            return  # from the previous topic
         try:
             model = UrdfModel(msg.data)
         except Exception as e:
@@ -498,6 +608,8 @@ class ServoCommander(Node):
             meshes = model.mesh_filenames()
             for filename in meshes:
                 glb_url(filename, self.get_logger())
+            if generation != self._description_generation:
+                return  # the topic was changed meanwhile
             self.model = model
             self.get_logger().info(
                 f"Robot model loaded: {len(model.joints)} joints, {len(meshes)} meshes, "

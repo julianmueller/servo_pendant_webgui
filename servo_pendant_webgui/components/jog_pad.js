@@ -1,29 +1,39 @@
 // Spring-return jog pad (2D touchpad, or a 1D rocker with axes 'x' / 'y'), sized by CSS.
 // Touch anywhere and drag: the drag offset (not the touch position) is the velocity command, so touching never jumps
 // to speed. Emits 'jog' {x, y} (-1..1) every 50 ms while touched (heartbeat) and {x: 0, y: 0} on release.
+// `highlight` {side: left / right / up / down, sign: pos / neg} lights up one half (the direction picked in 3D).
 const MARGIN = 30; // px, half the puck size
 
 export default {
   template: `
-    <div class="sp-pad" ref="pad" :class="{ 'sp-active': active, 'sp-disabled': disabled, ['sp-pad-' + axes]: true }"
+    <div class="sp-pad" ref="pad" :class="padClass"
          @pointerdown.prevent="onDown" @pointermove.prevent="onMove" @pointerup="release" @pointercancel="release">
+      <div v-if="highlight.side" class="sp-pad-glow" :class="['sp-glow-' + highlight.side, 'sp-hl-' + highlight.sign]">
+      </div>
       <div v-if="axes !== 'y'" class="sp-pad-hline"></div>
       <div v-if="axes !== 'x'" class="sp-pad-vline"></div>
-      <div v-if="labels.left" class="sp-pad-label sp-left">{{ labels.left }}</div>
-      <div v-if="labels.right" class="sp-pad-label sp-right">{{ labels.right }}</div>
-      <div v-if="labels.up" class="sp-pad-label sp-up">{{ labels.up }}</div>
-      <div v-if="labels.down" class="sp-pad-label sp-down">{{ labels.down }}</div>
+      <div v-for="side in ['left', 'right', 'up', 'down']" v-show="labels[side]" :key="side"
+           class="sp-pad-label" :class="labelClass(side)">{{ labels[side] }}</div>
       <div class="sp-puck" :style="puckStyle"></div>
     </div>`,
   props: {
     axes: { type: String, default: "xy" },
     labels: { type: Object, default: () => ({}) },
+    highlight: { type: Object, default: () => ({}) },
     disabled: { type: Boolean, default: false },
   },
   data() {
     return { x: 0, y: 0, x0: 0, y0: 0, active: false, timer: null };
   },
   computed: {
+    padClass() {
+      return {
+        "sp-active": this.active,
+        "sp-disabled": this.disabled,
+        ["sp-pad-" + this.axes]: true,
+        ["sp-hl-" + this.highlight.sign]: !!this.highlight.side,
+      };
+    },
     puckStyle() {
       return {
         left: `calc(50% + ${this.x} * (50% - ${MARGIN}px))`,
@@ -32,6 +42,9 @@ export default {
     },
   },
   methods: {
+    labelClass(side) {
+      return ["sp-" + side, side === this.highlight.side ? "sp-hl-" + this.highlight.sign : ""];
+    },
     onDown(e) {
       if (this.disabled) return;
       e.currentTarget.setPointerCapture(e.pointerId);

@@ -46,13 +46,13 @@ The page fills the browser width. Cartesian, robot and joints start a third of t
 (⋮⋮) in the gap between two panels to resize them; the sizes are kept until the page is reloaded. Below 1100 px one column is
 shown: the control of the active mode (Cartesian or joints; switch with the action bar), and the robot below it.
 
-- **Header**: the ROS connection (click: settings), Servo's state (mode accepted, rejected or not available), the age
-  of the joint states, and a red chip when more than one node publishes `/joint_states` (cross-talk, e.g. another
+- **Header**: the ROS connection (click: settings), Servo's state (mode accepted, rejected or not available; click:
+  send the command type to Servo again, see [Servo's command type](#servos-command-type)), the age of the joint states, and a red chip when more than one node publishes `/joint_states` (cross-talk, e.g. another
   robot in the same ROS domain; click it for the node names). Joint states with a timestamp older than the newest one
   received are ignored.
 - **Action bar (the footer, always at the bottom of the window)**:
   - **Cartesian / Joint** switches the active side and Servo's command type (`/servo_node/switch_command_type`).
-    Tapping the dimmed side does the same. Servo is switched again automatically whenever it (re)appears.
+    Tapping the dimmed side does the same. Tapping the mode that is already active sends the type to Servo again.
   - **Speed** scales every command (default 30 %).
   - **Stop** releases all inputs. This is a software stop, not an emergency stop.
 - **Joints (right)**: one row per joint from `/joint_states` (finger joints hidden).
@@ -67,8 +67,14 @@ shown: the control of the active mode (Cartesian or joints; switch with the acti
 - **Robot (centre)**: the robot from `/robot_description` with its URDF visual meshes (converted to glTF once and
   cached in `~/.cache/servo_pendant_webgui`).
   - Joint mode: a labelled ring shows each joint's positive direction. The moving one is coloured.
-  - Cartesian mode: an arrow and / or ring at the tool shows the commanded motion.
+  - Cartesian mode: six see-through arrows at the tool (+X, −X, +Y, −Y, +Z, −Z) show the jog directions in the
+    selected frame (base or tool). The commanded ones turn solid, and a ring at the tool shows a commanded rotation.
+  - Rings and arrows are drawn over the robot, so the ones behind it or inside the gripper stay visible.
   - Steel blue = positive, amber = negative. The arrow head of a moving joint's ring points in its direction of motion.
+  - Pointing at a ring or arrow (mouse) or tapping it turns it solid and highlights the control that drives it: the
+    joint's row, or the half of the pad or rocker for that direction. Tapping an arrow also switches to the plane
+    whose rocker drives that axis alone (X: YZ, Y: XZ, Z: XY). A tapped control stays highlighted for 2.5 s. Nothing
+    moves from the 3D view: jogging stays on the controls.
   - A loading overlay is shown until the robot description has arrived and all meshes are loaded in the browser.
   - Below the view: the command currently sent to Servo.
 
@@ -80,14 +86,17 @@ An overlay with tabs, from the gear top right, the ROS chip, or <kbd>Ctrl</kbd>+
 
 - **ROS** (the whole webgui): domain ID, discovery range, static peers, node name, namespace. *Apply and restart*
   restarts the webgui's ROS node with them; they are saved in `~/.ros/servo_pendant_webgui/settings.json`.
-- **Web GUI** (the whole webgui, applied at once):
-  - **Frames and joints**: the joint states topic (the JointState topics found, or any name, e.g.
-    `/isaac_joint_states`), base and tool frame (links of the URDF, or any name) and the hidden joints (regular
-    expressions). Applied at once to every open page; held inputs are released.
+- **Web GUI** (the whole webgui, applied at once to every open page; held inputs are released). Each control is a
+  node parameter: a change here sets the parameter, and a `ros2 param set` shows up here at once.
+  - **Topics and services**: joint states, robot description, Cartesian and joint commands, and Servo's command
+    type service. Each is a dropdown of the topics (services) of its type found in the ROS graph; type any other
+    name and press Enter (e.g. `/isaac_joint_states`). A new robot description topic keeps the robot shown until
+    its description arrives.
+  - **Frames and joints**: base and tool frame (links of the URDF, or any name) and the hidden joints (regular
+    expressions).
   - **MoveIt Servo**: Servo's parameters (`moveit_servo.*`: move group, command out topic, ...), read from its node
-    (`/servo_node`, from `switch_command_type_service`). Read-only.
-  - **Parameters**: all node parameters, changed live (same as `ros2 param set`). The other topics and the service
-    are read-only.
+    (`/servo_node`, from the command type service). Read-only.
+  - **Parameters**: the other node parameters (speeds, publish rate, input timeout).
 - **Appearance** (this browser): light, dark or system theme, text size and spacing (`?text=larger` in the address
   for a kiosk). Browser zoom (<kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>-</kbd>) works too.
 - **About**: what the pendant is, its version and address, start options, ROS and software facts.
@@ -116,6 +125,20 @@ Digit keys work on the top row and the numpad. Other plain typing is swallowed, 
 quick find never opens. Some browsers reserve <kbd>Ctrl</kbd>+<kbd>1</kbd> … <kbd>8</kbd> for switching tabs: use
 <kbd>Shift</kbd>, or full screen (<kbd>F</kbd>), which also locks the keyboard to the page.
 
+## Servo's command type
+
+MoveIt Servo only accepts commands of the type it was last switched to, and logs *Command type has not been set,
+cannot accept input* for every other one. Servo has no service to ask for its current type, and other clients (e.g.
+a planner that moves the robot through Servo) switch it for themselves. So the pendant sends the type of its mode:
+
+- when Servo's service (re)appears, so also when the pendant starts,
+- on every mode button, mode key and tap on the dimmed side, also for the mode that is already active,
+- whenever a jog starts, and every second while jogging; the first command waits for Servo's answer (at most 0.5 s),
+- at once when Servo logs that warning while the pendant jogs (read from `/rosout`): at most one command is lost,
+- on a click on the Servo chip in the header, by hand.
+
+It is not sent while the pendant is idle, so it never takes Servo from another client that uses it meanwhile.
+
 ## Safety
 
 Commands are only sent while a control is touched or a key is held. Each control sends a heartbeat every 50 ms. An
@@ -136,6 +159,5 @@ explicitly. After a release, three zero commands are sent, then the stream stops
 | `publish_rate` [Hz], `input_timeout` [s] | `50`, `0.3` |
 | `exclude_joints` (regexes) | `['.*finger.*']` |
 
-`joint_states_topic`, the frames, speeds, `publish_rate`, `input_timeout` and `exclude_joints` can be changed while the
-node runs, in the settings or with `ros2 param set` (all held inputs are released on a change; a new joint states
-topic starts the joint list over). The other topics and the service are read-only: set them at launch.
+All of them can be changed while the node runs, in the settings or with `ros2 param set` (all held inputs are
+released on a change; a new joint states topic starts the joint list over).

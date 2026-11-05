@@ -1,6 +1,13 @@
-"""Touch-friendly NiceGUI jog controls (spring-return slider and pad) and keyboard jogging."""
+"""Touch-friendly NiceGUI jog controls (spring-return slider and pad), keyboard jogging and 3D picking."""
+
+from pathlib import Path
 
 from nicegui import ui
+
+
+def scene_pick_script():
+    """The browser side of picking the jog gizmos in the 3D view (components/scene_pick.js), for add_body_html."""
+    return f"<script>{(Path(__file__).parent / 'scene_pick.js').read_text()}</script>"
 
 
 def _jog_args(e):
@@ -42,6 +49,13 @@ class JogPad(_Disableable, ui.element, component='jog_pad.js'):
     def set_labels(self, labels):
         self._props['labels'] = labels
         self.update()
+
+    def set_highlight(self, side=None, sign=1):
+        """Light up one half (left / right / up / down) of the pad in the colour of the sign; None: no highlight."""
+        highlight = {'side': side, 'sign': 'pos' if sign > 0 else 'neg'} if side else {}
+        if self._props.get('highlight') != highlight:
+            self._props['highlight'] = highlight
+            self.update()
 
 
 class KeyJog(ui.element, component='key_jog.js'):

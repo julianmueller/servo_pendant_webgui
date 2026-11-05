@@ -4,22 +4,29 @@ joints right, and mode, speed and STOP in the action bar at the bottom. The thre
 third each at the start, and their borders can be dragged (two nested splitters). One screen without scrolling from
 1280×800; on narrow screens one column with scrolling: the control of the active mode, the robot below it.
 
+The joint rings and Cartesian arrows of the 3D view can be picked: hovering one, or tapping it, highlights the control
+that drives it (the joint's row, or the half of the pad or rocker). Tapping an arrow also switches to the plane whose
+rocker drives that axis alone (X: YZ, Y: XZ, Z: XY).
+
 The page is rebuilt whenever the bridge has a new node (domain change in the settings), since every control talks to
 the node it was built for.
 """
 
 import math
+import time
 
 from nicegui import ui
 
-from servo_pendant_webgui.components import JogPad, JogSlider, KeyJog
+from servo_pendant_webgui.components import JogPad, JogSlider, KeyJog, scene_pick_script
 from servo_pendant_webgui.robot_view import RobotView
-from servo_pendant_webgui.ros_node import AXIS_NAMES, JOINT, PLANES, TWIST
+from servo_pendant_webgui.ros_node import AXIS_NAMES, JOINT, MODE_NAMES, PLANES, TWIST
 from servo_pendant_webgui.shell import theme
 
 SPEED_MIN, SPEED_STEP = 5, 5  # [%]
 TOGGLE = "no-caps unelevated toggle-color=primary"
 STATUS_ICONS = {"ok": "sym_o_check_circle", "warn": "sym_o_warning", "bad": "sym_o_error"}
+PICK_HIGHLIGHT = 2.5  # [s] a control picked by tapping its ring or arrow in the 3D view stays highlighted
+ROCKER_PLANES = {rocker: plane for plane, (_, rocker) in PLANES.items()}  # axis -> plane whose rocker drives it
 
 CSS = """
 :root { --sp-bar-h: 77px; --sp-bar-space: var(--sp-bar-h); }  /* space: the footer's measured height (BAR_JS) */
@@ -63,7 +70,7 @@ CSS = """
 .sp-speed { flex: 1; display: flex; align-items: center; gap: 16px; min-width: 240px; }
 .sp-speed-value { font-size: var(--wg-fs-lg); font-weight: 600; width: 52px; text-align: right; }
 /* the shell makes sliders 44 px high for touch, but Quasar keeps the track at the top: centre it */
-.sp-speed .q-slider { justify-content: center; }
+.sp-speed .q-slider { justify-content: center; margin: 0 var(--wg-space); }  /* the thumb sticks out half its size at the ends */
 
 /* mode overlay: tap the dimmed side to switch to its mode */
 .sp-overlay { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center;
@@ -127,7 +134,7 @@ CSS = """
 .sp-trans { flex: 1; min-height: 0; display: flex; gap: 12px; align-items: center; justify-content: center;
             container-type: size; }
 .sp-pad { position: relative; touch-action: none; border-radius: var(--wg-radius); background: var(--wg-sunken);
-          border: 2px solid var(--wg-border); cursor: move; }
+          border: 2px solid var(--wg-border); cursor: move; overflow: hidden; }
 .sp-pad-xy { width: min(100cqw - 90px, 100cqh); height: min(100cqw - 90px, 100cqh); flex: none; }
 .sp-pad-y { width: 78px; height: min(100cqw - 90px, 100cqh); flex: none; }
 .sp-pad.sp-active { border-color: var(--wg-primary); }
@@ -142,6 +149,24 @@ CSS = """
 .sp-puck { position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%;
            background: var(--wg-surface); border: 2px solid var(--wg-subtle); }
 .sp-pad.sp-active .sp-puck { background: var(--wg-primary); border-color: var(--wg-primary); }
+/* the control of the ring or arrow picked in the 3D view (hovered, or tapped a moment ago): the joint's row, or the
+   half of the pad or rocker for the direction, in its colour (positive: primary, negative: warning) */
+.sp-pad.sp-hl-pos { border-color: var(--wg-primary); }
+.sp-pad.sp-hl-neg { border-color: var(--wg-warning); }
+.sp-pad-glow { position: absolute; pointer-events: none; }
+.sp-glow-left { left: 0; top: 0; bottom: 0; width: 50%; }
+.sp-glow-right { right: 0; top: 0; bottom: 0; width: 50%; }
+.sp-glow-up { left: 0; right: 0; top: 0; height: 50%; }
+.sp-glow-down { left: 0; right: 0; bottom: 0; height: 50%; }
+.sp-pad-glow.sp-hl-pos { background: color-mix(in srgb, var(--wg-primary) 16%, transparent); }
+.sp-pad-glow.sp-hl-neg { background: color-mix(in srgb, var(--wg-warning) 18%, transparent); }
+.sp-pad-label.sp-hl-pos { color: var(--wg-primary); }
+.sp-pad-label.sp-hl-neg { color: var(--wg-warning); }
+.sp-jrow { transition: background-color .15s, box-shadow .15s; }
+.sp-jrow.sp-hl { --sp-hl: color-mix(in srgb, var(--wg-primary) 14%, transparent); border-radius: var(--wg-radius-sm);
+                 background: var(--sp-hl); box-shadow: 0 0 0 6px var(--sp-hl); }  /* spread: room around the row */
+.sp-jrow.sp-hl .sp-jnum, .sp-jrow.sp-hl .sp-plus { color: var(--wg-primary); }
+.sp-jrow.sp-hl .sp-slider-rail { border-color: var(--wg-primary); }
 .sp-rot { display: grid; grid-template-columns: 32px minmax(0, 1fr); align-items: center; column-gap: 8px;
           height: 44px; }
 .sp-rot-label { font-size: var(--wg-fs); font-weight: 600; }
@@ -191,13 +216,18 @@ class PendantPage:
         self._chips = {}
         self.dark = bool(frame.dark.value)  # corrected by _sync_theme when the theme follows the system
         self.view = None
+        self._hover = None  # key of the ring or arrow under the mouse in the 3D view
+        self._pressed = (None, 0.0)  # (key, monotonic time until which it stays highlighted) of the last tap
+        self._shown_highlight = None
         self._split = [100 / 3, 50]  # [%] of the two splitters: kept when the page is rebuilt after a reconnect
         ui.add_css(CSS)
         ui.add_body_html(KEYBOARD_LOCK_JS)
+        ui.add_body_html(scene_pick_script())
         self.keys = KeyJog(7, on_jog=self._jog_key, on_stop=self.stop)
 
         with frame.status_bar:
-            self.servo_chip = ui.element("div")
+            # click: send the command type to Servo again (a manual fallback; it is also sent automatically)
+            self.servo_chip = ui.element("button").on("click", self._send_command_type)
             self.states_chip = ui.element("div")
             self.crosstalk_chip = ui.element("button").on("click", self._show_crosstalk)
         self.main = ui.element("div").classes("sp-main")
@@ -224,6 +254,7 @@ class PendantPage:
         self.bar.clear()
         self.view = None
         self.joint_widgets, self._shown_joints = {}, None
+        self._shown_highlight = None
         if c is None:
             with self.main, ui.element("section").classes("wg-panel sp-wide"):
                 with ui.element("div").classes("wg-empty"):
@@ -301,7 +332,7 @@ class PendantPage:
                     "wg-icon-btn"
                 ).tooltip(f"Reset the view ({self.key_labels['view']})")
             with ui.element("div").classes("sp-view"):
-                self.view = RobotView(c, self.dark)
+                self.view = RobotView(c, self.dark, on_pick=self._on_pick)
                 with ui.element("div").classes("sp-loading") as self.loading:
                     ui.spinner(size="40px")
                     self.loading_label = ui.label("Loading the robot")
@@ -322,6 +353,7 @@ class PendantPage:
     def _build_rows(self, c):
         self.rows.clear()
         self.joint_widgets = {}
+        self._shown_highlight = None
         self._shown_joints = names = list(c.joint_names)
         self.keys.set_count(len(names))
         with self.rows:
@@ -333,7 +365,7 @@ class PendantPage:
                     ui.label(c.get_parameter("joint_states_topic").value).classes("wg-mono")
                 return
             for i, name in enumerate(names):
-                with ui.element("div").classes("sp-jrow"):
+                with ui.element("div").classes("sp-jrow") as row:
                     with ui.element("div").classes("sp-jname"):
                         ui.label(f"J{i + 1}").classes("sp-jnum").tooltip(name)
                         if i < 9:
@@ -345,11 +377,13 @@ class PendantPage:
                         hi = ui.label()
                     angle = ui.label("–").classes("sp-jangle")
                     slider = JogSlider(on_jog=lambda v, n=name: self._input("j:" + n, v))
-                    self.joint_widgets[name] = (lo, hi, mark, angle, slider)
+                    self.joint_widgets[name] = (lo, hi, mark, angle, slider, row)
 
     def _action_bar(self, c):
+        # on click, not on change: a click on the active mode sends Servo's command type again
         self.mode_toggle = (
-            ui.toggle({TWIST: "Cartesian", JOINT: "Joint"}, value=c.mode, on_change=lambda e: self.set_mode(e.value))
+            ui.toggle({TWIST: "Cartesian", JOINT: "Joint"}, value=c.mode)
+            .on("click", lambda: self.set_mode(self.mode_toggle.value))
             .props(TOGGLE)
             .classes("sp-mode")
             .tooltip(f"Mode of MoveIt Servo ({self.key_labels['cartesian']} / {self.key_labels['joint']})")
@@ -406,12 +440,19 @@ class PendantPage:
             c.stop()
 
     def set_mode(self, mode):
+        """Switches the mode; the mode that is already active sends Servo's command type again."""
         c = self.node
         if c is None or self._built_for is not c:
             return
-        if c.mode != mode:
-            c.set_mode(mode)
+        c.set_mode(mode)
         self._show_mode(c)
+
+    def _send_command_type(self):
+        c = self.node
+        if c is None:
+            return
+        c.send_command_type()
+        ui.notify(f"Sent the {MODE_NAMES[c.mode]} command type to Servo", type="info")
 
     def _show_mode(self, c):
         self.mode_toggle.value = c.mode
@@ -421,7 +462,7 @@ class PendantPage:
         self.cart_overlay.set_visibility(c.mode != TWIST)
         self.joint_overlay.set_visibility(c.mode != JOINT)
         self.view_hint.set_text(
-            "Rings: positive direction of each joint" if c.mode == JOINT else "Arrow and ring: commanded tool motion"
+            "Tap a ring to find its slider" if c.mode == JOINT else "Tap an arrow to find its control"
         )
 
     def _set_frame(self, frame):
@@ -465,6 +506,61 @@ class PendantPage:
         if c is not None:
             c.set_speed(min(max(round(c.speed * 100) + delta, SPEED_MIN), 100) / 100)
 
+    def _on_pick(self, kind, key):
+        """Handle a ring or arrow in the 3D view that was hovered (key None: none any more) or tapped."""
+        c = self.node
+        if c is None or self._built_for is not c:
+            return
+        if kind == "hover":
+            self._hover = key
+        elif key is not None:
+            self._pressed = (key, time.monotonic() + PICK_HIGHLIGHT)
+            if key.startswith("j:"):
+                target = self.joint_widgets.get(key[2:], (None,))[-1]
+            else:  # the rocker of the plane drives the axis alone
+                self._set_plane(ROCKER_PLANES[AXIS_NAMES.index(key[0].upper())])
+                target = self.rocker
+            if target is not None:  # one-column layout: the control may be scrolled away
+                ui.run_javascript(
+                    f"getHtmlElement({target.id})?.scrollIntoView({{block: 'nearest', behavior: 'smooth'}})"
+                )
+        self._show_highlight(c)
+        if self.view is not None:
+            self.view.update()  # the ring or arrow solid at once, not with the next tick
+
+    def _highlighted(self, c):
+        """Return the ring or arrow to highlight: hovered, or tapped a moment ago; only those of the active mode."""
+        key, until = self._pressed
+        key = self._hover or (key if time.monotonic() < until else None)
+        if key is None or key.startswith("j:") != (c.mode == JOINT):
+            return None
+        return key
+
+    def _show_highlight(self, c):
+        key = self._highlighted(c)
+        if self.view is not None:
+            self.view.highlight = key
+        if self._shown_highlight == (key, c.plane):
+            return
+        self._shown_highlight = (key, c.plane)
+        for name, (*_, row) in self.joint_widgets.items():
+            if key == "j:" + name:
+                row.classes(add="sp-hl")
+            else:
+                row.classes(remove="sp-hl")
+        pad = rocker = (None,)
+        if key is not None and not key.startswith("j:"):
+            axis, sign = AXIS_NAMES.index(key[0].upper()), 1 if key[1] == "+" else -1
+            (h, v), _ = PLANES[c.plane]
+            if axis == h:
+                pad = ("right" if sign > 0 else "left", sign)
+            elif axis == v:
+                pad = ("up" if sign > 0 else "down", sign)
+            else:
+                rocker = ("up" if sign > 0 else "down", sign)
+        self.pad.set_highlight(*pad)
+        self.rocker.set_highlight(*rocker)
+
     def _reset_view(self):
         if self.view is not None:
             self.view.reset_camera()
@@ -482,6 +578,7 @@ class PendantPage:
             self._rebuild()
         if c is None:
             return
+        self._show_highlight(c)
         self.view.update()
         if c.joint_names != self._shown_joints:
             self._build_rows(c)
@@ -501,7 +598,7 @@ class PendantPage:
         positions = c.snapshot_positions()
         model = c.model
         inputs = c.active_inputs()
-        for name, (lo, hi, mark, angle, slider) in self.joint_widgets.items():
+        for name, (lo, hi, mark, angle, slider, _) in self.joint_widgets.items():
             slider.set_external(float(inputs.get("k:" + name, 0.0)))
             if name not in positions:
                 continue
@@ -528,6 +625,10 @@ class PendantPage:
         with chip:
             ui.icon(STATUS_ICONS[level], size="18px")
             ui.label(text)
+            if chip is self.servo_chip:
+                ui.icon("sym_o_sync", size="18px")
+                ui.tooltip("Send the command type to Servo again. It is also sent on every mode change, whenever "
+                           "a jog starts and when Servo rejects a command.")  # fmt: skip
 
     def _update_status(self):
         c = self.node

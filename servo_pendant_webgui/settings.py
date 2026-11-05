@@ -1,12 +1,15 @@
 """
 App sections of Settings > Web GUI (the shell adds the node parameters and the ROS, Appearance and About tabs): the
-joint states topic, the command frames and hidden joints with editors the generic parameter list has no control for,
-and MoveIt Servo's parameters.
+topics and the Servo service as dropdowns of the ones found, the command frames and hidden joints, with editors the
+generic parameter list has no control for, and MoveIt Servo's parameters. The controls follow the parameters while
+the settings are open, so a `ros2 param set` shows up at once.
 """
 
 import asyncio
 
 from nicegui import ui
+
+from servo_pendant_webgui.shell import settings_panel
 
 # MoveIt Servo parameters shown first; the others are folded away
 SERVO_MAIN = (
@@ -42,42 +45,134 @@ def _apply(node, name, value):
         ui.notify(f"{name} not changed: {reason}", type="negative")
 
 
+class _LiveRows:
+    """
+    Keeps the controls of a section in step with the node's parameters while the settings are open, so a change made
+    elsewhere (`ros2 param set`, another browser) shows up at once. A control is only updated when its parameter
+    changed, so a value being typed is not overwritten.
+    """
+
+    def __init__(self, panel):
+        self.panel = panel
+        self.rows = []  # [name, control, options (callable or None), last parameter value]
+        self._ticks = 0
+        ui.timer(0.5, self._sync)
+
+    def add(self, name, control, options=None):
+        node = self.panel.bridge.node
+        self.rows.append([name, control, options, node.get_parameter(name).value])
+        return control
+
+    def _sync(self):
+        node = self.panel.bridge.node
+        if node is None or not self.panel.dialog.value:
+            return
+        self._ticks += 1
+        for row in self.rows:
+            name, control, options, last = row
+            value = node.get_parameter(name).value
+            if isinstance(value, (list, tuple)):
+                value = list(value)
+            if options is not None and (value != last or self._ticks % 4 == 0):  # topics come and go: every 2 s
+                control.set_options(_with(options(node), value), value=value)
+            elif value != last:
+                control.value = value
+            row[3] = value
+
+
+def _with(options, value):
+    return options if value in options else [*options, value]
+
+
+def _select(panel, live, name, options):
+    """A dropdown of the found names, which also takes any other name (typed, then Enter)."""
+    node = panel.bridge.node
+    value = node.get_parameter(name).value
+    return live.add(
+        name,
+        ui.select(
+            _with(options(node), value),
+            value=value,
+            with_input=True,
+            new_value_mode="add-unique",
+            on_change=lambda e: _apply(panel.bridge.node, name, e.value),
+        ).props("outlined"),
+        options,
+    )
+
+
+def _description_topics(node):
+    # every std_msgs/String topic, those named like a robot description first
+    return sorted(node.connection_names("robot_description_topic"), key=lambda n: ("description" not in n, n))
+
+
+# parameter -> (title, description, options)
+TOPICS = {
+    "joint_states_topic": (
+        "Joint states",
+        "sensor_msgs/JointState of the robot (e.g. /isaac_joint_states)",
+        lambda node: node.connection_names("joint_states_topic"),
+    ),
+    "robot_description_topic": (
+        "Robot description",
+        "std_msgs/String with the URDF, for the 3D view and the joint limits",
+        _description_topics,
+    ),
+    "twist_topic": (
+        "Cartesian commands",
+        "geometry_msgs/TwistStamped to Servo",
+        lambda node: node.connection_names("twist_topic"),
+    ),
+    "joint_jog_topic": (
+        "Joint commands",
+        "control_msgs/JointJog to Servo",
+        lambda node: node.connection_names("joint_jog_topic"),
+    ),
+    "switch_command_type_service": (
+        "Servo command type service",
+        "moveit_msgs/ServoCommandType. Servo's node (for its parameters) is found from it.",
+        lambda node: node.connection_names("switch_command_type_service"),
+    ),
+}
+
+
+def topics_section(panel):
+    node = panel.bridge.node
+    if node is None:
+        return
+    panel.section("Topics and services", "The topics and services found of each type; type another name and press "
+                  "Enter. Applies at once to every open page. Held inputs are released.")  # fmt: skip
+    live = _LiveRows(panel)
+    for name, (title, description, options) in TOPICS.items():
+        with panel.row(title, description, name):
+            _select(panel, live, name, options)
+
+
 def robot_control_section(panel):
     node = panel.bridge.node
     if node is None:
         return
     panel.section("Frames and joints", "Applies at once to every open page. Held inputs are released.")
-    topic = node.get_parameter("joint_states_topic").value
-    topics = node.joint_state_topics()
-    with panel.row("Joint states topic", "sensor_msgs/JointState of the robot (e.g. /isaac_joint_states)",
-                   "joint_states_topic"):
-        ui.select(
-            topics if topic in topics else topics + [topic],
-            value=topic,
-            with_input=True,
-            new_value_mode="add-unique",
-            on_change=lambda e: _apply(panel.bridge.node, "joint_states_topic", e.value),
-        ).props("outlined")
-    links = list(node.model.links) if node.model is not None else []
+    live = _LiveRows(panel)
+
+    def links(node):
+        return list(node.model.links) if node.model is not None else []
+
     for name, title, description in (
         ("base_frame", "Base frame", "Frame of the commands in base mode"),
         ("tool_frame", "Tool frame", "Frame of the commands in tool mode"),
     ):
-        value = node.get_parameter(name).value
         with panel.row(title, description, name):
-            ui.select(
-                links if value in links else links + [value],
-                value=value,
-                with_input=True,
-                new_value_mode="add-unique",
-                on_change=lambda e, n=name: _apply(panel.bridge.node, n, e.value),
-            ).props("outlined")
+            _select(panel, live, name, links)
     with panel.row("Hidden joints", "Regular expressions of joints not shown in the panel", "exclude_joints"):
-        ui.input_chips(
-            value=list(node.get_parameter("exclude_joints").value),
-            new_value_mode="add-unique",
-            on_change=lambda e: _apply(panel.bridge.node, "exclude_joints", list(e.value)),
-        ).props("outlined")
+        live.add(
+            "exclude_joints",
+            ui.input_chips(
+                value=list(node.get_parameter("exclude_joints").value),
+                new_value_mode="add-unique",
+                on_change=lambda e: _apply(panel.bridge.node, "exclude_joints", list(e.value)),
+            ).props("outlined"),
+        )
 
 
 def servo_section(panel):
@@ -117,4 +212,7 @@ def _servo_row(panel, name, value):
         ui.label(_text(value)).classes("wg-mono wg-set-value")
 
 
-SETTINGS_SECTIONS = (robot_control_section, servo_section)
+SETTINGS_SECTIONS = (topics_section, robot_control_section, servo_section)
+
+# Shown by the sections above with their own controls: not again in the generic parameter list of the shell
+settings_panel.HIDDEN_PARAMETERS.update((*TOPICS, "base_frame", "tool_frame", "exclude_joints"))
