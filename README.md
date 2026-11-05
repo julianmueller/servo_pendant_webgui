@@ -43,16 +43,24 @@ parameters `host` and `port`; they are command line options now.
 ## Panel
 
 The page fills the browser width. Cartesian, robot and joints start a third of the width each. Drag the handle
-(⋮⋮) in the gap between two panels to resize them; the sizes are kept until the page is reloaded. Below 1100 px one column is
+(⋮⋮) in the gap between two panels to resize them: the left one moves only the border between Cartesian and robot,
+the right one only the border between robot and joints; the panel on the far side keeps its width. Double-click a
+handle for three equal panels again. The sizes are kept until the page is reloaded. Below 1100 px one column is
 shown: the control of the active mode (Cartesian or joints; switch with the action bar), and the robot below it.
 
-- **Header**: the ROS connection (click: settings), Servo's state (mode accepted, rejected or not available; click:
-  send the command type to Servo again, see [Servo's command type](#servos-command-type)), the age of the joint states, and a red chip when more than one node publishes `/joint_states` (cross-talk, e.g. another
+- **Header**: the ROS connection (click: settings), Servo's state (mode accepted, rejected, paused or not available;
+  click: send the command type to Servo again, see [Servo's command type](#servos-command-type)), Servo's own status
+  from `/servo_node/status` when it is not *no warning* (amber while slowing down for a singularity or a collision,
+  red when halted or at a joint limit; its message is shown over the 3D view), the age of the joint states, and a red chip when more than one node publishes `/joint_states` (cross-talk, e.g. another
   robot in the same ROS domain; click it for the node names). Joint states with a timestamp older than the newest one
   received are ignored.
 - **Action bar (the footer, always at the bottom of the window)**:
   - **Cartesian / Joint** switches the active side and Servo's command type (`/servo_node/switch_command_type`).
     Tapping the dimmed side does the same. Tapping the mode that is already active sends the type to Servo again.
+  - **Pause** stops the jog and pauses Servo (`/servo_node/pause_servo`, `true`): both sides are dimmed, the 3D
+    view shows no rings or arrows, and nothing is sent. Choosing a mode (a side, a mode button or key) resumes Servo
+    (`false`) in that mode; **Pause** again resumes the mode from before. The pendant **starts paused**, without
+    calling the service: merely opening it must not pause Servo for another client, such as a planner.
   - **Speed** scales every command (default 30 %).
   - **Stop** releases all inputs. This is a software stop, not an emergency stop.
 - **Joints (right)**: one row per joint from `/joint_states` (finger joints hidden).
@@ -111,7 +119,8 @@ Keyboard jogging is off while the settings are open.
 | --- | --- |
 | <kbd>1</kbd> … <kbd>9</kbd> (held, joint mode) | jog joint 1 … 9 positive; with <kbd>Ctrl</kbd> or <kbd>Shift</kbd> negative |
 | <kbd>Esc</kbd> | stop: release all inputs |
-| <kbd>C</kbd> / <kbd>J</kbd> | Cartesian / joint mode |
+| <kbd>C</kbd> / <kbd>J</kbd> | Cartesian / joint mode (resumes Servo when paused) |
+| <kbd>X</kbd> | pause Servo / resume the mode from before |
 | <kbd>+</kbd> / <kbd>-</kbd> | speed +5 % / −5 % |
 | <kbd>B</kbd> / <kbd>T</kbd> | commands in the base / tool frame |
 | <kbd>P</kbd> | next plane of the pad (XY, XZ, YZ) |
@@ -131,7 +140,7 @@ MoveIt Servo only accepts commands of the type it was last switched to, and logs
 cannot accept input* for every other one. Servo has no service to ask for its current type, and other clients (e.g.
 a planner that moves the robot through Servo) switch it for themselves. So the pendant sends the type of its mode:
 
-- when Servo's service (re)appears, so also when the pendant starts,
+- when Servo's service (re)appears while a mode is chosen (the pendant starts paused, with none),
 - on every mode button, mode key and tap on the dimmed side, also for the mode that is already active,
 - whenever a jog starts, and every second while jogging; the first command waits for Servo's answer (at most 0.5 s),
 - at once when Servo logs that warning while the pendant jogs (read from `/rosout`): at most one command is lost,
@@ -156,6 +165,8 @@ explicitly. After a release, three zero commands are sent, then the stream stops
 | `twist_topic`, `joint_jog_topic` | `/servo_node/delta_twist_cmds`, `/servo_node/delta_joint_cmds` |
 | `joint_states_topic`, `robot_description_topic` | `/joint_states`, `/robot_description` |
 | `switch_command_type_service` | `/servo_node/switch_command_type` |
+| `pause_servo_service` (`std_srvs/SetBool`) | `/servo_node/pause_servo` |
+| `servo_status_topic` (`moveit_msgs/ServoStatus`) | `/servo_node/status` |
 | `publish_rate` [Hz], `input_timeout` [s] | `50`, `0.3` |
 | `exclude_joints` (regexes) | `['.*finger.*']` |
 

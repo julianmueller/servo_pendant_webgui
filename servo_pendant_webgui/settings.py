@@ -133,6 +133,16 @@ TOPICS = {
         "moveit_msgs/ServoCommandType. Servo's node (for its parameters) is found from it.",
         lambda node: node.connection_names("switch_command_type_service"),
     ),
+    "pause_servo_service": (
+        "Servo pause service",
+        "std_srvs/SetBool: called with true by Pause, with false when a mode is chosen again",
+        lambda node: node.connection_names("pause_servo_service"),
+    ),
+    "servo_status_topic": (
+        "Servo status",
+        "moveit_msgs/ServoStatus: slowing down or halted, and why. Shown on the robot while not NO_WARNING.",
+        lambda node: node.connection_names("servo_status_topic"),
+    ),
 }
 
 

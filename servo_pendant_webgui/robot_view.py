@@ -13,7 +13,7 @@ import numpy as np
 from nicegui import ui
 
 from servo_pendant_webgui.mesh_cache import glb_url
-from servo_pendant_webgui.ros_node import AXIS_NAMES, JOINT
+from servo_pendant_webgui.ros_node import AXIS_NAMES, JOINT, TWIST
 from servo_pendant_webgui.shell import theme
 
 # Links without a material in the URDF
@@ -411,7 +411,7 @@ class RobotView:
         # cartesian mode: the six directions of the command frame at the tool, see-through; the commanded and the
         # highlighted ones solid. A ring at the tool for the commanded rotation.
         tool = links.get(self.c.tool_frame)
-        cartesian = not joint_mode and tool is not None
+        cartesian = self.c.mode == TWIST and tool is not None  # paused (no mode): neither rings nor arrows
         ring_shown = False
         if cartesian:
             linear, angular = self.c.cartesian_command(inputs)

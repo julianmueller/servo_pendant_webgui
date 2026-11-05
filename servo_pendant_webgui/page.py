@@ -1,8 +1,12 @@
 """
 The pendant (workbench layout, like a robot teach pendant): Cartesian jogging left, the robot in the middle, the
 joints right, and mode, speed and STOP in the action bar at the bottom. The three panels fill the browser width, a
-third each at the start, and their borders can be dragged (two nested splitters). One screen without scrolling from
-1280×800; on narrow screens one column with scrolling: the control of the active mode, the robot below it.
+third each at the start, and their borders can be dragged: each border moves only itself, the robot in the middle
+takes up the difference. One screen without scrolling from 1280×800; on narrow screens one column with scrolling:
+the control of the active mode, the robot below it.
+
+The pendant starts paused (no mode): both sides dimmed, nothing sent. Choosing a mode resumes Servo in it; Pause
+pauses Servo again and remembers the mode, to resume it.
 
 The joint rings and Cartesian arrows of the 3D view can be picked: hovering one, or tapping it, highlights the control
 that drives it (the joint's row, or the half of the pad or rocker). Tapping an arrow also switches to the plane whose
@@ -35,22 +39,36 @@ CSS = """
 .sp-main > .sp-wide { flex: 1; justify-content: center; }
 .wg-panel.sp-panel { position: relative; gap: 8px; min-height: 0; overflow: hidden; flex: 1; }
 
-/* resizable panels: two nested splitters (outer: Cartesian | rest, inner: robot | joints). The handles take no
-   width; the gaps are paddings of the splitter parts, shared so that 1/3 and 1/2 give three equal panels. The handle
-   is 44 px wide to grab (also by touch) and lies in the gap. */
-.sp-split { width: 100%; height: 100%; --sp-gap: var(--wg-space); }
-.sp-split > .q-splitter__panel { display: flex; flex-direction: row; align-items: stretch; min-width: 0;
-                                 overflow: hidden; }
-.sp-outer > .q-splitter__before { padding-right: calc(var(--sp-gap) * 2 / 3); }
-.sp-inner > .q-splitter__before { padding: 0 calc(var(--sp-gap) / 3); }
-.sp-inner > .q-splitter__after { padding-left: calc(var(--sp-gap) * 2 / 3); }
-.sp-split > .q-splitter__separator { width: 0; background: transparent; overflow: visible; z-index: 6; }
-.sp-split > .q-splitter__separator > .q-splitter__separator-area { left: -22px; right: -22px; display: flex;
-  align-items: center; justify-content: center; color: var(--wg-subtle); }
-.sp-outer > .q-splitter__separator .q-icon { transform: translateX(calc(var(--sp-gap) / -6)); }
-.sp-inner > .q-splitter__separator .q-icon { transform: translateX(calc(var(--sp-gap) / 6)); }
-.sp-split > .q-splitter__separator:hover .q-icon, .sp-split.q-splitter--active > .q-splitter__separator .q-icon {
-  color: var(--wg-primary); }
+/* resizable panels: ONE row of three columns. The left and right columns have their own widths (--sp-l, --sp-r:
+   fractions of the width without the two gaps, so 1/3 each gives three equal panels) and the robot in the middle
+   takes the rest -- so dragging the left border resizes only the left panel and the robot, never the joints.
+   Each handle IS the gap between two panels, so its icon is centred in it by construction; it is 44 px wide to grab
+   (also by touch), reaching over the panel edges. Dragging is done in the browser (SPLIT_JS). */
+.sp-cols { display: flex; width: 100%; height: 100%; --sp-gap: var(--wg-space); --sp-l: 0.3333; --sp-r: 0.3333; }
+.sp-col { display: flex; flex-direction: row; align-items: stretch; min-width: 0; overflow: hidden; }
+.sp-col-l { flex: 0 0 calc((100% - 2 * var(--sp-gap)) * var(--sp-l)); }
+.sp-col-r { flex: 0 0 calc((100% - 2 * var(--sp-gap)) * var(--sp-r)); }
+.sp-col-c { flex: 1 1 0; }
+.sp-handle { flex: 0 0 var(--sp-gap); position: relative; z-index: 6; cursor: col-resize; touch-action: none;
+             color: var(--wg-subtle); }
+.sp-handle::before { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 44px; margin-left: -22px; }
+.sp-handle > .q-icon { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+                       pointer-events: none; }
+.sp-handle:hover, .sp-cols.sp-dragging > .sp-handle.sp-active { color: var(--wg-primary); }
+.sp-cols.sp-dragging { cursor: col-resize; }
+
+/* Servo's status (moveit_msgs/ServoStatus), over the top of the 3D view while it is not NO_WARNING. Over the view,
+   not above it: a row appearing would resize the view, and the scene with it. Above the loading overlay (50) too:
+   a halt is news even while the meshes load. */
+.sp-report { position: absolute; top: 8px; left: 8px; right: 8px; z-index: 60; pointer-events: none;
+             display: flex; gap: 10px; align-items: flex-start; padding: 8px 12px; border-radius: var(--wg-radius-sm);
+             background: var(--wg-surface); border: 1px solid var(--wg-border); border-left-width: 4px; }
+.sp-report.wg-warn { border-left-color: var(--wg-warning); }
+.sp-report.wg-bad { border-left-color: var(--wg-negative); }
+.sp-report.wg-warn > .q-icon { color: var(--wg-warning); }
+.sp-report.wg-bad > .q-icon { color: var(--wg-negative); }
+.sp-report-title { font-weight: 600; }
+.sp-report-text { display: flex; flex-direction: column; min-width: 0; }
 .sp-row { display: flex; align-items: center; gap: 12px; }
 /* narrow panels: the title keeps its width, the hint next to it is cut off with an ellipsis */
 .sp-panel > .wg-panel-head > .wg-h2 { flex: none; }
@@ -67,6 +85,10 @@ CSS = """
 .sp-bar { width: 100%; min-height: var(--sp-bar-h); user-select: none; }
 /* + toggle border: 56 px like STOP */
 .sp-mode .q-btn { min-height: 54px; font-size: var(--wg-fs-lg); padding: 0 24px; }
+/* Pause is the same size as STOP (the shell's .wg-stop: 56 px high, large bold label), and both share one width, so
+   neither looks the lesser of the two and Pause / Paused does not change the button's width. em: follows the text. */
+.q-btn.sp-pause { min-height: 56px; font-size: var(--wg-fs-lg); font-weight: 600; padding: 0 28px; }
+.sp-bar .q-btn.sp-pause, .sp-bar .q-btn.wg-stop { min-width: 9.5em; }
 .sp-speed { flex: 1; display: flex; align-items: center; gap: 16px; min-width: 240px; }
 .sp-speed-value { font-size: var(--wg-fs-lg); font-weight: 600; width: 52px; text-align: right; }
 /* the shell makes sliders 44 px high for touch, but Quasar keeps the track at the top: centre it */
@@ -172,18 +194,20 @@ CSS = """
 .sp-rot-label { font-size: var(--wg-fs); font-weight: 600; }
 
 @media (max-width: 1100px) {
-  /* one column: only the control of the active mode, the robot below it (scrolling). The splitter wrappers are
-     dissolved (display: contents), so the three panels are items of one column and can be ordered and hidden. */
+  /* one column: only the control of the active mode, the robot below it (scrolling); paused, both. The column
+     wrappers are dissolved (display: contents), so the three panels are items of one column and can be ordered and
+     hidden. */
   .sp-main { height: auto; min-height: 0; }
-  .sp-outer.q-splitter--vertical { flex-direction: column; height: auto; gap: var(--wg-space); }
-  .sp-outer > .q-splitter__panel, .sp-inner, .sp-inner > .q-splitter__panel { display: contents; }
-  .sp-split > .q-splitter__separator { display: none; }
+  .sp-cols { flex-direction: column; height: auto; gap: var(--wg-space); }
+  .sp-col { display: contents; }
+  .sp-handle { display: none; }
   .wg-panel.sp-panel { flex: none; }
   .sp-cart { height: 600px; } .sp-robot { height: 420px; order: 2; } .sp-joints { height: 640px; }
   .sp-main.sp-m-joint .sp-cart, .sp-main.sp-m-twist .sp-joints { display: none; }
 }
-@media (max-width: 720px) {  /* mode and STOP in one row, speed below */
-  .sp-bar .wg-stop { margin-left: auto; padding: 0 20px; }
+@media (max-width: 720px) {  /* mode, Pause and STOP in one row, speed below */
+  .sp-bar .sp-pause { margin-left: auto; }
+  .sp-bar .q-btn.sp-pause, .sp-bar .q-btn.wg-stop { padding: 0 20px; min-width: 8.5em; }
   .sp-mode .q-btn { padding: 0 16px; }
   .sp-speed { order: 3; flex-basis: 100%; }
 }
@@ -208,6 +232,65 @@ document.addEventListener("fullscreenchange", () => {
 </script>"""
 
 
+# Panel widths [fraction of the width without the gaps] for the left (Cartesian) and right (joints) column; the robot
+# in the middle takes the rest and keeps at least SPLIT_CENTER_MIN
+SPLIT_DEFAULT, SPLIT_MIN, SPLIT_MAX, SPLIT_CENTER_MIN = 1 / 3, 0.15, 0.6, 0.2
+
+# Dragging a column border: a pointer interaction, so it runs in the browser and Python only hears the result
+# (`sp_split`) to keep it across a rebuild. Relative to where the drag started, so grabbing the 44 px handle off its
+# centre does not make the border jump. Double-click: three equal panels again.
+SPLIT_JS = f"""<script>
+(() => {{
+  const MIN = {SPLIT_MIN}, MAX = {SPLIT_MAX}, CENTER_MIN = {SPLIT_CENTER_MIN}, THIRD = {SPLIT_DEFAULT};
+  const clamp = (v, hi) => Math.min(Math.max(v, MIN), Math.min(MAX, hi));
+  const read = (cols) => {{
+    const css = getComputedStyle(cols);
+    return [parseFloat(css.getPropertyValue("--sp-l")) || THIRD, parseFloat(css.getPropertyValue("--sp-r")) || THIRD];
+  }};
+  const apply = (cols, l, r) => {{
+    cols.style.setProperty("--sp-l", l);
+    cols.style.setProperty("--sp-r", r);
+  }};
+  document.addEventListener("pointerdown", (e) => {{
+    const handle = e.target.closest && e.target.closest(".sp-handle");
+    if (!handle || e.button > 0) return;
+    e.preventDefault();
+    const cols = handle.parentElement, left = handle.dataset.side === "l";
+    const [l0, r0] = read(cols), x0 = e.clientX;
+    let l = l0, r = r0;
+    try {{ handle.setPointerCapture(e.pointerId); }} catch (_) {{}}  // keeps the drag if the pointer leaves the handle
+    handle.classList.add("sp-active");
+    cols.classList.add("sp-dragging");
+    const move = (ev) => {{
+      const inner = cols.getBoundingClientRect().width - 2 * handle.offsetWidth;
+      if (inner <= 0) return;
+      const dx = (ev.clientX - x0) / inner;
+      if (left) l = clamp(l0 + dx, 1 - CENTER_MIN - r);
+      else r = clamp(r0 - dx, 1 - CENTER_MIN - l);
+      apply(cols, l, r);
+    }};
+    const up = () => {{
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      handle.classList.remove("sp-active");
+      cols.classList.remove("sp-dragging");
+      if (l !== l0 || r !== r0) emitEvent("sp_split", {{l, r}});
+    }};
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  }});
+  document.addEventListener("dblclick", (e) => {{
+    const handle = e.target.closest && e.target.closest(".sp-handle");
+    if (!handle) return;
+    apply(handle.parentElement, THIRD, THIRD);
+    emitEvent("sp_split", {{l: THIRD, r: THIRD}});
+  }});
+}})();
+</script>"""
+
+
 class PendantPage:
     def __init__(self, frame):
         self.frame = frame
@@ -219,15 +302,20 @@ class PendantPage:
         self._hover = None  # key of the ring or arrow under the mouse in the 3D view
         self._pressed = (None, 0.0)  # (key, monotonic time until which it stays highlighted) of the last tap
         self._shown_highlight = None
-        self._split = [100 / 3, 50]  # [%] of the two splitters: kept when the page is rebuilt after a reconnect
+        # widths of the left and right column (see SPLIT_JS): kept when the page is rebuilt after a reconnect
+        self._split = [SPLIT_DEFAULT, SPLIT_DEFAULT]
+        self._cols = None
         ui.add_css(CSS)
         ui.add_body_html(KEYBOARD_LOCK_JS)
+        ui.add_body_html(SPLIT_JS)
+        ui.on("sp_split", self._on_split)
         ui.add_body_html(scene_pick_script())
         self.keys = KeyJog(7, on_jog=self._jog_key, on_stop=self.stop)
 
         with frame.status_bar:
             # click: send the command type to Servo again (a manual fallback; it is also sent automatically)
             self.servo_chip = ui.element("button").on("click", self._send_command_type)
+            self.report_chip = ui.element("div")  # Servo's own status: slowing down or halted
             self.states_chip = ui.element("div")
             self.crosstalk_chip = ui.element("button").on("click", self._show_crosstalk)
         self.main = ui.element("div").classes("sp-main")
@@ -262,32 +350,43 @@ class PendantPage:
                     ui.label("Reconnecting to ROS")
                     ui.label("The controls come back when the new connection is up.").classes("wg-hint")
             return
-        with self.main:
-            outer = self._splitter(0, "sp-outer", limits=(15, 60))
-            with outer.before:
+        with self.main, ui.element("div").classes("sp-cols").style(self._split_style()) as self._cols:
+            with ui.element("div").classes("sp-col sp-col-l"):
                 self._cartesian_panel(c)
-            with outer.after:
-                inner = self._splitter(1, "sp-inner", limits=(20, 80))
-                with inner.before:
-                    self._robot_panel(c)
-                with inner.after:
-                    self._joints_panel(c)
+            self._handle("l")
+            with ui.element("div").classes("sp-col sp-col-c"):
+                self._robot_panel(c)
+            self._handle("r")
+            with ui.element("div").classes("sp-col sp-col-r"):
+                self._joints_panel(c)
         with self.bar:
             self._action_bar(c)
         self._build_rows(c)
         self._refresh_labels(c)
         self._show_mode(c)
 
-    def _splitter(self, index, classes, limits):
-        """Side-by-side splitter (value: width of the left part [%]); the handle sits in the gap of the panels."""
-        splitter = ui.splitter(
-            value=self._split[index],
-            limits=limits,
-            on_change=lambda e: self._split.__setitem__(index, e.value),
-        ).classes("sp-split " + classes)
-        with splitter.separator:
-            ui.icon("sym_o_drag_indicator", size="20px").tooltip("Drag to resize the panels")
-        return splitter
+    def _handle(self, side):
+        """The border between two columns: the gap itself, dragged in the browser (SPLIT_JS)."""
+        with ui.element("div").classes("sp-handle").props(f'data-side="{side}"'):
+            ui.icon("sym_o_drag_indicator", size="20px")
+            ui.tooltip("Drag to resize the panels, double-click for equal ones")
+
+    def _split_style(self):
+        left, right = self._split
+        return f"--sp-l: {left:.4f}; --sp-r: {right:.4f}"
+
+    def _on_split(self, e):
+        """A border was dragged: keep the widths (the browser has applied them already)."""
+        try:
+            left, right = float(e.args["l"]), float(e.args["r"])
+        except (KeyError, TypeError, ValueError):
+            return
+        left = min(max(left, SPLIT_MIN), SPLIT_MAX)
+        right = min(max(right, SPLIT_MIN), SPLIT_MAX, 1 - SPLIT_CENTER_MIN - left)
+        self._split = [left, right]
+        if self._cols is not None and not self._cols.is_deleted:
+            # the same values the browser already shows, so a later update of the element does not undo the drag
+            self._cols.style(self._split_style())
 
     def _overlay(self, text, mode):
         with ui.element("div").classes("sp-overlay") as overlay:
@@ -333,6 +432,13 @@ class PendantPage:
                 ).tooltip(f"Reset the view ({self.key_labels['view']})")
             with ui.element("div").classes("sp-view"):
                 self.view = RobotView(c, self.dark, on_pick=self._on_pick)
+                with ui.element("div").classes("sp-report") as self.report:
+                    self.report_icon = ui.icon(STATUS_ICONS["warn"], size="22px")
+                    with ui.element("div").classes("sp-report-text"):
+                        self.report_title = ui.label().classes("sp-report-title")
+                        self.report_message = ui.label().classes("wg-hint")
+                self.report.set_visibility(False)
+                self._shown_report = None
                 with ui.element("div").classes("sp-loading") as self.loading:
                     ui.spinner(size="40px")
                     self.loading_label = ui.label("Loading the robot")
@@ -348,7 +454,7 @@ class PendantPage:
                 ui.label("Joints").classes("wg-h2")
                 ui.label("Hold 1–9 to jog, with Ctrl or Shift negative").classes("wg-hint sp-ellipsis")
             self.rows = ui.element("div").classes("sp-jrows")
-            self.joint_overlay = self._overlay("Tap to jog in joint mode", JOINT)
+            self.joint_overlay = self._overlay("Tap to jog in Joint mode", JOINT)
 
     def _build_rows(self, c):
         self.rows.clear()
@@ -397,6 +503,15 @@ class PendantPage:
                 .classes("flex-1")
                 .tooltip(f"Scales every command ({self.key_labels['faster']} / {self.key_labels['slower']})")
             )
+        self.pause_button = (
+            ui.button("Pause", icon="sym_o_pause", on_click=self.toggle_pause)
+            .props("no-caps outline")
+            .classes("sp-pause")
+            .tooltip(
+                f"Pause Servo, or resume the mode before ({self.key_labels['pause']}). Paused, nothing is sent; "
+                "tapping a panel also resumes in its mode."
+            )
+        )
         ui.button("Stop", icon="sym_o_stop", on_click=self.stop).props("unelevated color=negative").classes(
             "wg-stop"
         ).tooltip("Releases all inputs (Esc). A software stop, not an emergency stop.")
@@ -408,6 +523,7 @@ class PendantPage:
         self.key_labels = {
             "cartesian": k.add("c", "Cartesian mode", lambda: self.set_mode(TWIST), group="Mode"),
             "joint": k.add("j", "Joint mode", lambda: self.set_mode(JOINT), group="Mode"),
+            "pause": k.add("x", "Pause Servo / resume the mode before", self.toggle_pause, group="Mode"),
             "faster": k.add("+", f"Speed +{SPEED_STEP} %", lambda: self._change_speed(SPEED_STEP), group="Speed"),
             "slower": k.add("-", f"Speed −{SPEED_STEP} %", lambda: self._change_speed(-SPEED_STEP), group="Speed"),
             "base": k.add("b", "Commands in the base frame", lambda: self._set_frame("base"), group="Cartesian"),
@@ -447,23 +563,64 @@ class PendantPage:
         c.set_mode(mode)
         self._show_mode(c)
 
+    def toggle_pause(self):
+        """Pause Servo (no mode), or resume the mode that was active before."""
+        c = self.node
+        if c is None or self._built_for is not c:
+            return
+        c.toggle_pause()
+        self._show_mode(c)
+
     def _send_command_type(self):
         c = self.node
         if c is None:
+            return
+        if c.paused:
+            ui.notify("Paused: choose a mode first (tap a panel)", type="info")
             return
         c.send_command_type()
         ui.notify(f"Sent the {MODE_NAMES[c.mode]} command type to Servo", type="info")
 
     def _show_mode(self, c):
-        self.mode_toggle.value = c.mode
-        # one-column layout (narrow browsers): only the active control is shown (CSS)
-        joint = c.mode == JOINT
-        self.main.classes(add="sp-m-joint" if joint else "sp-m-twist", remove="sp-m-twist" if joint else "sp-m-joint")
+        self.mode_toggle.value = c.mode  # None while paused: neither button lit
+        # one-column layout (narrow browsers): only the active control is shown (CSS); paused, both
+        modes = {JOINT: "sp-m-joint", TWIST: "sp-m-twist"}
+        self.main.classes(add=modes.get(c.mode, ""), remove=" ".join(v for k, v in modes.items() if k != c.mode))
+        # paused: both panels dimmed, each offering its mode (which resumes Servo)
         self.cart_overlay.set_visibility(c.mode != TWIST)
         self.joint_overlay.set_visibility(c.mode != JOINT)
-        self.view_hint.set_text(
-            "Tap a ring to find its slider" if c.mode == JOINT else "Tap an arrow to find its control"
-        )
+        if c.paused:
+            hint = "Paused: tap a panel to jog"
+        elif c.mode == JOINT:
+            hint = "Tap a ring to find its slider"
+        else:
+            hint = "Tap an arrow to find its control"
+        self.view_hint.set_text(hint)
+        if c.paused:
+            self.pause_button.props(remove="outline").props("unelevated color=primary")
+            self.pause_button.set_text("Paused")
+            self.pause_button.props("icon=sym_o_play_arrow")
+        else:
+            self.pause_button.props(remove="unelevated color=primary").props("outline")
+            self.pause_button.set_text("Pause")
+            self.pause_button.props("icon=sym_o_pause")
+
+    def _show_report(self, c):
+        """Servo's status (moveit_msgs/ServoStatus): a chip, and the message over the 3D view; hidden at NO_WARNING."""
+        report = c.servo_report()
+        if report == self._shown_report:
+            return
+        self._shown_report = report
+        self.report.set_visibility(report is not None)
+        self._chip(self.report_chip, report[:2] if report is not None else None)
+        if report is None:
+            return
+        level, title, message = report
+        self.report.classes(replace=f"sp-report wg-{level}")
+        self.report_icon.props(f"name={STATUS_ICONS[level]}")
+        self.report_title.set_text(title)
+        self.report_message.set_text(message)
+        self.report_message.set_visibility(bool(message))
 
     def _set_frame(self, frame):
         c = self.node
@@ -532,7 +689,7 @@ class PendantPage:
         """Return the ring or arrow to highlight: hovered, or tapped a moment ago; only those of the active mode."""
         key, until = self._pressed
         key = self._hover or (key if time.monotonic() < until else None)
-        if key is None or key.startswith("j:") != (c.mode == JOINT):
+        if key is None or c.paused or key.startswith("j:") != (c.mode == JOINT):
             return None
         return key
 
@@ -580,6 +737,7 @@ class PendantPage:
             return
         self._show_highlight(c)
         self.view.update()
+        self._show_report(c)
         if c.joint_names != self._shown_joints:
             self._build_rows(c)
         # changed elsewhere: another browser, a shortcut
@@ -633,7 +791,7 @@ class PendantPage:
     def _update_status(self):
         c = self.node
         if c is None:
-            for chip in (self.servo_chip, self.states_chip, self.crosstalk_chip):
+            for chip in (self.servo_chip, self.report_chip, self.states_chip, self.crosstalk_chip):
                 self._chip(chip, None)
             return
         self._chip(self.servo_chip, c.servo_status)

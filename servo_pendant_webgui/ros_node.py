@@ -17,18 +17,20 @@ from rclpy.validate_topic_name import validate_topic_name
 
 from control_msgs.msg import JointJog
 from geometry_msgs.msg import TwistStamped
+from moveit_msgs.msg import ServoStatus
 from moveit_msgs.srv import ServoCommandType
 from rcl_interfaces.msg import Log, ParameterDescriptor, SetParametersResult
 from rcl_interfaces.srv import GetParameters, ListParameters
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
+from std_srvs.srv import SetBool
 
 from servo_pendant_webgui.mesh_cache import glb_url
 from servo_pendant_webgui.urdf_kinematics import UrdfModel
 
 JOINT = "joint"
 TWIST = "twist"
-MODE_NAMES = {JOINT: "joint", TWIST: "Cartesian"}
+MODE_NAMES = {JOINT: "Joint", TWIST: "Cartesian"}
 
 # Which base/tool axes the 2D pad (horizontal, vertical) and the 1D rocker drive, per plane
 PLANES = {
@@ -45,6 +47,21 @@ CONNECTIONS = {
     "twist_topic": "geometry_msgs/msg/TwistStamped",
     "joint_jog_topic": "control_msgs/msg/JointJog",
     "switch_command_type_service": "moveit_msgs/srv/ServoCommandType",
+    "pause_servo_service": "std_srvs/srv/SetBool",
+    "servo_status_topic": "moveit_msgs/msg/ServoStatus",
+}
+
+# moveit_msgs/ServoStatus code -> (level ok / warn / bad, what it means). Slowing down is a warning, Servo refusing to
+# move (a halt, a joint at its bound) is an error. NO_WARNING (0) is not shown at all.
+SERVO_CODES = {
+    ServoStatus.INVALID: ("bad", "Servo: invalid state"),
+    ServoStatus.NO_WARNING: ("ok", "Servo: no warning"),
+    ServoStatus.DECELERATE_FOR_APPROACHING_SINGULARITY: ("warn", "Slowing: approaching a singularity"),
+    ServoStatus.HALT_FOR_SINGULARITY: ("bad", "Halted: singularity"),
+    ServoStatus.DECELERATE_FOR_LEAVING_SINGULARITY: ("warn", "Slowing: leaving a singularity"),
+    ServoStatus.DECELERATE_FOR_COLLISION: ("warn", "Slowing: collision ahead"),
+    ServoStatus.HALT_FOR_COLLISION: ("bad", "Halted: collision"),
+    ServoStatus.JOINT_BOUND: ("bad", "Halted: joint at its limit"),
 }
 
 # MoveIt Servo's warning for a command of another type than the one it was switched to
@@ -103,6 +120,8 @@ class ServoCommander(Node):
             "/servo_node/switch_command_type",
             "Switches Servo between joint and Cartesian commands",
         )
+        p("pause_servo_service", "/servo_node/pause_servo", "Pauses (true) and resumes (false) Servo")
+        p("servo_status_topic", "/servo_node/status", "Servo's status: slowing down or halted, and why")
         p("base_frame", "panda_link0", "Frame of Cartesian commands in base mode")
         p("tool_frame", "panda_link8", "Frame of Cartesian commands in tool mode")
         p("max_linear_speed", 0.1, "[m/s] at full deflection and 100 % speed")
@@ -129,7 +148,10 @@ class ServoCommander(Node):
 
         self._lock = threading.Lock()
         self._inputs = {}  # key -> (value, monotonic time)
-        self.mode = TWIST
+        # JOINT, TWIST, or None: paused, the start state. Nothing is published while paused, and the command type is
+        # only sent once a mode is chosen, so merely opening the pendant takes Servo from no other client.
+        self.mode = None
+        self._resume_mode = TWIST  # the mode Pause returns to
         self.speed = 0.3  # global speed scale 0..1
         self.frame = "base"  # 'base' | 'tool'
         self.plane = "XY"
@@ -148,6 +170,7 @@ class ServoCommander(Node):
         self._joint_stamps = {}  # joint -> newest joint_states stamp [s], to drop stale / out-of-order messages
 
         self.servo_status = ("warn", "Waiting for Servo")  # (level ok / warn / bad, text) for the page
+        self._servo_report = None  # (code, message) of the latest ServoStatus, None before the first one
         self._servo_was_ready = False
         # Servo accepts only commands of the type it was switched to (it has no service to ask for the current type),
         # and other clients (nbv_planner's small steps) switch it for themselves. So the type is sent: when Servo
@@ -170,6 +193,10 @@ class ServoCommander(Node):
         self._description_sub = self._subscribe_description(self.robot_description_topic)
         self._switch_client = None
         self._connect_servo(val("switch_command_type_service"))
+        self._pause_client = self.create_client(SetBool, val("pause_servo_service"))
+        self._status_sub = self.create_subscription(
+            ServoStatus, val("servo_status_topic"), self._on_servo_status, 10
+        )
         # Servo's log, to notice at once when it rejects the commands because another client switched its type
         self.create_subscription(Log, "/rosout", self._on_rosout, 100)
         self._publish_timer = self.create_timer(
@@ -193,15 +220,68 @@ class ServoCommander(Node):
             self._inputs.clear()
 
     def set_mode(self, mode):
-        """Switches the mode, and Servo's command type with it. The same mode again sends the type again."""
+        """Switches the mode, and Servo's command type with it. The same mode again sends the type again.
+
+        None pauses: the jog is stopped, Servo is paused, and nothing is published until a mode is chosen again,
+        which resumes Servo first.
+        """
         if mode != self.mode:
             jogging = self._idle_count < 3
             self.release_all()
-            if jogging:
+            if jogging and self.mode is not None:
                 self._publish_stop()  # stop in the old mode's type before Servo is switched
+            if self.mode is not None:
+                self._resume_mode = self.mode
+            was_paused = self.mode is None
             self.mode = mode
             self._idle_count = 3  # no idle zero commands in the new type before Servo knows it
+            if mode is None:
+                self._call_pause(True)
+                return
+            if was_paused:
+                self._call_pause(False)
+        elif mode is None:
+            return
         self.send_command_type()
+
+    @property
+    def paused(self):
+        return self.mode is None
+
+    def toggle_pause(self):
+        """Pause, or resume the mode that was active before."""
+        self.set_mode(self._resume_mode if self.mode is None else None)
+
+    def _call_pause(self, pause):
+        """Asks Servo to pause or resume (asynchronously; servo_status shows a failure, or the pause)."""
+        verb = "pause" if pause else "resume"
+        if not self._pause_client.service_is_ready():
+            # the pendant itself sends nothing while paused, so this is safe; but say that Servo did not hear it
+            self.servo_status = ("warn", f"Could not {verb} Servo: no pause service")
+            return
+        future = self._pause_client.call_async(SetBool.Request(data=pause))
+
+        def done(f):
+            result = None if f.exception() is not None else f.result()
+            if result is None or not result.success:
+                reason = (result.message if result is not None else "") or "no answer"
+                self.servo_status = ("bad", f"Servo did not {verb}: {reason}")
+            elif pause and self.mode is None:
+                self.servo_status = ("ok", "Servo paused")
+
+        future.add_done_callback(done)
+
+    def _on_servo_status(self, msg):
+        self._servo_report = (int(msg.code), msg.message)
+
+    def servo_report(self):
+        """(level, title, message) of Servo's latest status, or None when there is nothing to warn about."""
+        report = self._servo_report
+        if report is None or report[0] == ServoStatus.NO_WARNING:
+            return None
+        code, message = report
+        level, title = SERVO_CODES.get(code, ("bad", f"Servo status {code}"))
+        return level, title, message
 
     def _publish_stop(self):
         """One zero command in the current mode's type: Servo stops at once instead of at its timeout."""
@@ -287,6 +367,8 @@ class ServoCommander(Node):
         return self.tool_frame if self.frame == "tool" else self.base_frame
 
     def _publish(self):
+        if self.mode is None:
+            return  # paused
         inputs = self.active_inputs()
         stamp = self.get_clock().now().to_msg()
         if self.mode == JOINT:
@@ -373,9 +455,13 @@ class ServoCommander(Node):
     def _watch_servo(self):
         ready = self._switch_client.service_is_ready()
         if ready and not self._servo_was_ready:
-            self.send_command_type()  # (re)appeared: make Servo match the panel's mode
+            if self.mode is None:
+                self.servo_status = ("ok", "Paused: choose a mode")
+            else:
+                self.send_command_type()  # (re)appeared: make Servo match the panel's mode
         elif not ready:
             self.servo_status = ("warn", "Servo not available")
+            self._servo_report = None  # its last status is no longer news
         self._servo_was_ready = ready
 
     def _on_rosout(self, msg):
@@ -393,6 +479,8 @@ class ServoCommander(Node):
 
     def send_command_type(self):
         """Asks Servo to switch to the current mode's command type (asynchronously; servo_status shows the answer)."""
+        if self.mode is None:
+            return  # paused: no type to send
         if not self._switch_client.service_is_ready():
             self.servo_status = ("warn", "Servo not available")
             return
@@ -463,6 +551,15 @@ class ServoCommander(Node):
                 self.destroy_publisher(old)
             elif name == "switch_command_type_service":
                 self._connect_servo(value.strip())
+            elif name == "pause_servo_service":
+                old, self._pause_client = self._pause_client, self.create_client(SetBool, value.strip())
+                self.destroy_client(old)
+            elif name == "servo_status_topic":
+                self.destroy_subscription(self._status_sub)
+                self._servo_report = None
+                self._status_sub = self.create_subscription(
+                    ServoStatus, value.strip(), self._on_servo_status, 10
+                )
             elif name == "base_frame":
                 self.base_frame = value.strip()
             elif name == "tool_frame":
