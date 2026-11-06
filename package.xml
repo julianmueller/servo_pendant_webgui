@@ -15,6 +15,7 @@
     <depend>control_msgs</depend>
     <depend>moveit_msgs</depend>
     <exec_depend>python3-numpy</exec_depend>
+    <exec_depend>python3-yaml</exec_depend>
     <exec_depend>ament_index_python</exec_depend>
     <!-- nicegui, trimesh, pycollada and yourdfpy are installed with pip (into the venv) -->
 

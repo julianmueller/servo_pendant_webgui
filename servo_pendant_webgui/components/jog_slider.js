@@ -1,7 +1,11 @@
 // Spring-return velocity slider. Touch anywhere and drag: the drag distance (not the touch position) is the
 // command, so touching never jumps to speed. Emits 'jog' {value: -1..1} every 50 ms while touched (heartbeat)
 // and {value: 0} on release. `external` shows a command coming from elsewhere (keyboard) when not touched.
+// Ticks at 0 and at ±25 / 50 / 75 % of the travel (where the thumb's centre is at that value; with the quadratic
+// response that is 6 / 25 / 56 % of the speed).
 const MARGIN = 22; // px, half the thumb width
+const TICKS = [-0.75, -0.5, -0.25, 0.25, 0.5, 0.75];
+const at = (v) => `calc(50% + ${v} * (50% - ${MARGIN}px))`; // where the thumb's centre is at value v
 
 export default {
   template: `
@@ -9,6 +13,7 @@ export default {
          @pointerdown.prevent="onDown" @pointermove.prevent="onMove" @pointerup="release" @pointercancel="release">
       <div class="sp-slider-rail"></div>
       <div class="sp-slider-fill" :class="shown >= 0 ? 'sp-pos' : 'sp-neg'" :style="fillStyle"></div>
+      <div v-for="t in ticks" :key="t" class="sp-slider-tick" :style="{ left: at(t) }"></div>
       <div class="sp-slider-zero"></div>
       <div class="sp-slider-sign sp-minus">&#8722;</div>
       <div class="sp-slider-sign sp-plus">+</div>
@@ -19,14 +24,14 @@ export default {
     external: { type: Number, default: 0 },
   },
   data() {
-    return { value: 0, active: false, x0: 0, timer: null };
+    return { value: 0, active: false, x0: 0, timer: null, ticks: TICKS };
   },
   computed: {
     shown() {
       return this.active || Math.abs(this.value) > 0.001 ? this.value : this.external;
     },
     thumbStyle() {
-      return { left: `calc(50% + ${this.shown} * (50% - ${MARGIN}px))` };
+      return { left: at(this.shown) };
     },
     fillStyle() {
       const v = this.shown;
@@ -35,6 +40,7 @@ export default {
     },
   },
   methods: {
+    at,
     onDown(e) {
       if (this.disabled) return;
       e.currentTarget.setPointerCapture(e.pointerId);

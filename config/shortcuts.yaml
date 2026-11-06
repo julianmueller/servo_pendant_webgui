@@ -1,0 +1,35 @@
+# Keyboard shortcuts of the servo pendant, one line per action:   <action>: <key>
+#
+# Read whenever a page is opened: edit, save, reload the page. (Installed with colcon build --symlink-install, the
+# installed file is a link to this one.) A wrong line is skipped, and the page and the log say why.
+#
+# A key is the browser's name for it (KeyboardEvent.key) in lower case:
+#   - a letter or digit: c
+#   - a character, in quotes: "+"   "-"   "."   "/"
+#   - a name: space, enter, tab, backspace, delete, insert, home, end, pageup, pagedown,
+#     arrowup, arrowdown, arrowleft, arrowright, f1 … f12
+# Modifiers go in front, joined with "+": ctrl+s, alt+p, ctrl+alt+x, shift+p. Ctrl is Cmd on a Mac. Shift only
+# counts with letters: on most layouts it is part of the character itself ("?" is Shift+/, "+" is Shift+= on US).
+# An empty key ("") switches the action's shortcut off.
+#
+# Not in this table (fixed): Esc (stop: release all inputs), 1 … 9 held (jog joint 1 … 9, with Ctrl or Shift
+# negative), and the web GUI's own ? (help), Ctrl+, (settings), D (theme) and F (full screen). These cannot be used
+# here.
+
+# Mode
+cartesian: c          # Cartesian mode (resumes Servo when paused)
+joint: j              # Joint mode (resumes Servo when paused)
+pause: space          # pause Servo / resume the mode from before
+
+# Speed
+faster: "+"           # speed +5 %
+slower: "-"           # speed −5 %
+
+# Cartesian
+base: b               # commands in the base frame
+tool: t               # commands in the tool frame
+plane: p              # next plane of the pad (XY, XZ, YZ)
+translation: s        # translation with the pad or with X / Y / Z sliders
+
+# Robot
+view: v               # reset the layout and the 3D view

@@ -10,6 +10,7 @@ import asyncio
 from nicegui import ui
 
 from servo_pendant_webgui.shell import settings_panel
+from servo_pendant_webgui.timers import page_timer
 
 # MoveIt Servo parameters shown first; the others are folded away
 SERVO_MAIN = (
@@ -56,7 +57,7 @@ class _LiveRows:
         self.panel = panel
         self.rows = []  # [name, control, options (callable or None), last parameter value]
         self._ticks = 0
-        ui.timer(0.5, self._sync)
+        page_timer(0.5, self._sync)
 
     def add(self, name, control, options=None):
         node = self.panel.bridge.node
@@ -214,7 +215,7 @@ def servo_section(panel):
                     for name in rest:
                         _servo_row(panel, name, values[name])
 
-    ui.timer(0, load, once=True)
+    page_timer(0, load, once=True)
 
 
 def _servo_row(panel, name, value):

@@ -9,28 +9,44 @@ The pendant starts paused (no mode): both sides dimmed, nothing sent. Choosing a
 pauses Servo again and remembers the mode, to resume it.
 
 The joint rings and Cartesian arrows of the 3D view can be picked: hovering one, or tapping it, highlights the control
-that drives it (the joint's row, or the half of the pad or rocker). Tapping an arrow also switches to the plane whose
-rocker drives that axis alone (X: YZ, Y: XZ, Z: XY).
+that drives it (the joint's row, the half of the pad or rocker, or the axis' slider). With the pad, tapping an arrow
+also switches to the plane whose rocker drives that axis alone (X: YZ, Y: XZ, Z: XY).
+
+Translation is jogged with a 2D pad in a plane plus a rocker for the third axis, or with one slider per axis (a
+switch above the pad, per browser).
 
 The page is rebuilt whenever the bridge has a new node (domain change in the settings), since every control talks to
 the node it was built for.
 """
 
+import logging
 import math
 import time
 
 from nicegui import ui
 
 from servo_pendant_webgui.components import JogPad, JogSlider, KeyJog, scene_pick_script
+from servo_pendant_webgui.keymap import load_keymap
 from servo_pendant_webgui.robot_view import RobotView
 from servo_pendant_webgui.ros_node import AXIS_NAMES, JOINT, MODE_NAMES, PLANES, TWIST
 from servo_pendant_webgui.shell import theme
+from servo_pendant_webgui.timers import page_timer
+
+log = logging.getLogger(__name__)
 
 SPEED_MIN, SPEED_STEP = 5, 5  # [%]
 TOGGLE = "no-caps unelevated toggle-color=primary"
 STATUS_ICONS = {"ok": "sym_o_check_circle", "warn": "sym_o_warning", "bad": "sym_o_error"}
 PICK_HIGHLIGHT = 2.5  # [s] a control picked by tapping its ring or arrow in the 3D view stays highlighted
 ROCKER_PLANES = {rocker: plane for plane, (_, rocker) in PLANES.items()}  # axis -> plane whose rocker drives it
+# How the Cartesian panel jogs X, Y and Z: a 2D pad in a plane and a rocker for the third axis, or a slider per axis
+TRANSLATION_INPUTS = {"pad": "Pad", "sliders": "Sliders"}
+
+# Panel widths [fraction of the width without the gaps] for the left (Cartesian) and right (joints) column; the robot
+# in the middle takes the rest and keeps at least SPLIT_CENTER_MIN. A side panel dragged narrower than
+# SPLIT_COLLAPSE_PX becomes a strip naming its mode, and keeps its width to come back at.
+SPLIT_DEFAULT, SPLIT_MAX, SPLIT_CENTER_MIN = 1 / 3, 0.6, 0.2
+SPLIT_COLLAPSE_PX = 250
 
 CSS = """
 :root { --sp-bar-h: 77px; --sp-bar-space: var(--sp-bar-h); }  /* space: the footer's measured height (BAR_JS) */
@@ -44,7 +60,8 @@ CSS = """
    takes the rest -- so dragging the left border resizes only the left panel and the robot, never the joints.
    Each handle IS the gap between two panels, so its icon is centred in it by construction; it is 44 px wide to grab
    (also by touch), reaching over the panel edges. Dragging is done in the browser (SPLIT_JS). */
-.sp-cols { display: flex; width: 100%; height: 100%; --sp-gap: var(--wg-space); --sp-l: 0.3333; --sp-r: 0.3333; }
+.sp-cols { display: flex; width: 100%; height: 100%; --sp-gap: var(--wg-space); --sp-l: 0.3333; --sp-r: 0.3333;
+           --sp-strip: 48px; }
 .sp-col { display: flex; flex-direction: row; align-items: stretch; min-width: 0; overflow: hidden; }
 .sp-col-l { flex: 0 0 calc((100% - 2 * var(--sp-gap)) * var(--sp-l)); }
 .sp-col-r { flex: 0 0 calc((100% - 2 * var(--sp-gap)) * var(--sp-r)); }
@@ -56,6 +73,23 @@ CSS = """
                        pointer-events: none; }
 .sp-handle:hover, .sp-cols.sp-dragging > .sp-handle.sp-active { color: var(--wg-primary); }
 .sp-cols.sp-dragging { cursor: col-resize; }
+
+/* A side panel dragged narrower than SPLIT_COLLAPSE_PX becomes a strip naming its mode, written vertically. Its
+   width (--sp-l / --sp-r) is kept, so tapping the strip brings the panel back at the size it had. Only in the
+   three-column layout: one column (narrow screens) shows the panels whatever their state here. */
+.sp-strip { display: none; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+            padding: 12px 0; font: inherit; cursor: pointer; color: var(--wg-text); background: var(--wg-surface);
+            border: 1px solid var(--wg-border); border-radius: var(--wg-radius); }
+.sp-strip:hover, .sp-strip.sp-strip-active { border-color: var(--wg-primary); color: var(--wg-primary); }
+.sp-strip-label { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap;
+                  font-size: var(--wg-fs-lg); font-weight: 600; }
+@media (min-width: 1101px) {
+  .sp-cols:not(.sp-collapsed-l) > .sp-col-l, .sp-cols:not(.sp-collapsed-r) > .sp-col-r {
+    min-width: {SPLIT_COLLAPSE_PX}px; }
+  .sp-cols.sp-collapsed-l > .sp-col-l, .sp-cols.sp-collapsed-r > .sp-col-r { flex: 0 0 var(--sp-strip); }
+  .sp-cols.sp-collapsed-l > .sp-col-l > .sp-panel, .sp-cols.sp-collapsed-r > .sp-col-r > .sp-panel { display: none; }
+  .sp-cols.sp-collapsed-l > .sp-col-l > .sp-strip, .sp-cols.sp-collapsed-r > .sp-col-r > .sp-strip { display: flex; }
+}
 
 /* Servo's status (moveit_msgs/ServoStatus), over the top of the 3D view while it is not NO_WARNING. Over the view,
    not above it: a row appearing would resize the view, and the scene with it. Above the loading overlay (50) too:
@@ -73,7 +107,7 @@ CSS = """
 /* narrow panels: the title keeps its width, the hint next to it is cut off with an ellipsis */
 .sp-panel > .wg-panel-head > .wg-h2 { flex: none; }
 .sp-panel > .wg-panel-head > .wg-hint { flex: 1; text-align: right; }
-.sp-panel > .wg-panel-head > .q-btn-toggle { margin-left: auto; }
+.sp-panel > .wg-panel-head > .q-btn-toggle, .sp-panel > .sp-row > .q-btn-toggle { margin-left: auto; }
 /* The action bar (mode, speed, STOP) is the footer: it is built in the shell footer's app slot, which takes the
    footer's whole width and height, and the shell's node / version line is hidden (node and version are in
    Settings > About). Quasar keeps the page clear of the footer, whatever its height. */
@@ -140,7 +174,11 @@ CSS = """
 .sp-slider-fill { position: absolute; top: 50%; height: 12px; margin-top: -6px; border-radius: 6px; }
 .sp-slider-fill.sp-pos { background: var(--wg-primary); }
 .sp-slider-fill.sp-neg { background: var(--wg-warning); }
-.sp-slider-zero { position: absolute; left: 50%; top: 15%; bottom: 15%; width: 2px; margin-left: -1px;
+/* Ticks of a fixed length, whatever the row's height, so every slider looks alike: the 0 tick sticks out 4 px above and
+   below the thumb at rest (32 px), the ones at ±25 / 50 / 75 % of the travel all alike, just out of the rail (12 px) */
+.sp-slider-tick { position: absolute; top: 50%; width: 2px; height: 14px; margin: -7px 0 0 -1px; border-radius: 1px;
+                  background: var(--wg-subtle); opacity: .7; }
+.sp-slider-zero { position: absolute; left: 50%; top: 50%; width: 2px; height: 40px; margin: -20px 0 0 -1px;
                   background: var(--wg-subtle); }
 .sp-slider-sign { position: absolute; top: 50%; transform: translateY(-50%); font-size: var(--wg-fs-lg);
                   font-weight: 600;
@@ -192,6 +230,16 @@ CSS = """
 .sp-rot { display: grid; grid-template-columns: 32px minmax(0, 1fr); align-items: center; column-gap: 8px;
           height: 44px; }
 .sp-rot-label { font-size: var(--wg-fs); font-weight: 600; }
+/* translation as three sliders (instead of the pad): rows like the rotation ones, a little taller, and Rotation right
+   below them, so the six sliders read as one list; the space the pad took stays free at the bottom */
+.sp-trans-sliders { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; }
+.sp-trans-sliders > .sp-trow { height: 52px; }
+.sp-trow { border-radius: var(--wg-radius-sm); transition: background-color .15s, box-shadow .15s; }
+.sp-trow.sp-hl { --sp-hl: color-mix(in srgb, var(--wg-primary) 14%, transparent); background: var(--sp-hl);
+                 box-shadow: 0 0 0 6px var(--sp-hl); }
+.sp-trow.sp-hl-neg { --sp-hl: color-mix(in srgb, var(--wg-warning) 18%, transparent); }
+.sp-trow.sp-hl-pos .sp-rot-label, .sp-trow.sp-hl-pos .sp-plus { color: var(--wg-primary); }
+.sp-trow.sp-hl-neg .sp-rot-label, .sp-trow.sp-hl-neg .sp-minus { color: var(--wg-warning); }
 
 @media (max-width: 1100px) {
   /* one column: only the control of the active mode, the robot below it (scrolling); paused, both. The column
@@ -211,7 +259,7 @@ CSS = """
   .sp-mode .q-btn { padding: 0 16px; }
   .sp-speed { order: 3; flex-basis: 100%; }
 }
-"""
+""".replace("{SPLIT_COLLAPSE_PX}", str(SPLIT_COLLAPSE_PX))
 
 # The footer (the action bar) is 77 px high, more when it wraps (narrow) or with a larger text size: measured, as
 # --sp-bar-space, for the height of the panels
@@ -224,50 +272,61 @@ if (footer && !footer.sp_observer) {
 }
 """
 
-# Full screen also locks the keyboard, so Ctrl+1 … 8 reach the page instead of switching browser tabs
+# Full screen also locks the keyboard, so Ctrl+1 … 8 reach the page instead of switching browser tabs.
+# A button clicked or tapped keeps the keyboard focus, and Space (or Enter) would then press it again instead of
+# reaching its shortcut (Quasar's buttons take the key before the page sees it): after a click with the pointer
+# (detail > 0; a click made with the keyboard has 0) the button lets go of the focus. Not in dialogs, which keep the
+# focus inside; tabbing to a button and pressing Space still presses it.
 KEYBOARD_LOCK_JS = """<script>
 document.addEventListener("fullscreenchange", () => {
   if (document.fullscreenElement && navigator.keyboard) navigator.keyboard.lock().catch(() => {});
 });
+document.addEventListener("click", (e) => {
+  const button = e.detail > 0 && e.target.closest && e.target.closest("button, .q-btn, [role=button]");
+  if (button && !button.closest(".q-dialog") && document.activeElement === button) button.blur();
+});
 </script>"""
 
 
-# Panel widths [fraction of the width without the gaps] for the left (Cartesian) and right (joints) column; the robot
-# in the middle takes the rest and keeps at least SPLIT_CENTER_MIN
-SPLIT_DEFAULT, SPLIT_MIN, SPLIT_MAX, SPLIT_CENTER_MIN = 1 / 3, 0.15, 0.6, 0.2
-
 # Dragging a column border: a pointer interaction, so it runs in the browser and Python only hears the result
 # (`sp_split`) to keep it across a rebuild. Relative to where the drag started, so grabbing the 44 px handle off its
-# centre does not make the border jump. Double-click: three equal panels again.
+# centre does not make the border jump. Below SPLIT_COLLAPSE_PX the side panel snaps to its strip (`sp-collapsed-l`
+# / `-r`) and keeps the width it had when the drag started, to come back at; dragged out of the strip past the same
+# width, it opens again. Double-click: three equal panels.
 SPLIT_JS = f"""<script>
 (() => {{
-  const MIN = {SPLIT_MIN}, MAX = {SPLIT_MAX}, CENTER_MIN = {SPLIT_CENTER_MIN}, THIRD = {SPLIT_DEFAULT};
-  const clamp = (v, hi) => Math.min(Math.max(v, MIN), Math.min(MAX, hi));
-  const read = (cols) => {{
-    const css = getComputedStyle(cols);
-    return [parseFloat(css.getPropertyValue("--sp-l")) || THIRD, parseFloat(css.getPropertyValue("--sp-r")) || THIRD];
-  }};
-  const apply = (cols, l, r) => {{
-    cols.style.setProperty("--sp-l", l);
-    cols.style.setProperty("--sp-r", r);
-  }};
+  const MAX = {SPLIT_MAX}, CENTER_MIN = {SPLIT_CENTER_MIN}, THIRD = {SPLIT_DEFAULT}, COLLAPSE = {SPLIT_COLLAPSE_PX};
+  const frac = (cols, side) => parseFloat(getComputedStyle(cols).getPropertyValue("--sp-" + side)) || THIRD;
+  const strip = (cols) => parseFloat(getComputedStyle(cols).getPropertyValue("--sp-strip")) || 48;
+  const report = (cols) => emitEvent("sp_split", {{
+    l: frac(cols, "l"), r: frac(cols, "r"),
+    cl: cols.classList.contains("sp-collapsed-l"), cr: cols.classList.contains("sp-collapsed-r"),
+  }});
   document.addEventListener("pointerdown", (e) => {{
     const handle = e.target.closest && e.target.closest(".sp-handle");
     if (!handle || e.button > 0) return;
     e.preventDefault();
-    const cols = handle.parentElement, left = handle.dataset.side === "l";
-    const [l0, r0] = read(cols), x0 = e.clientX;
-    let l = l0, r = r0;
+    const cols = handle.parentElement, side = handle.dataset.side, other = side === "l" ? "r" : "l";
+    const inner = cols.getBoundingClientRect().width - 2 * handle.offsetWidth;
+    if (inner <= 0) return;
+    const was = cols.classList.contains("sp-collapsed-" + side), f0 = frac(cols, side), x0 = e.clientX;
+    const otherPx = cols.classList.contains("sp-collapsed-" + other) ? strip(cols) : frac(cols, other) * inner;
+    const p0 = was ? strip(cols) : f0 * inner;  // where this side's border starts [px from its outer edge]
+    const maxPx = Math.min(MAX * inner, (1 - CENTER_MIN) * inner - otherPx);
     try {{ handle.setPointerCapture(e.pointerId); }} catch (_) {{}}  // keeps the drag if the pointer leaves the handle
     handle.classList.add("sp-active");
     cols.classList.add("sp-dragging");
+    let moved = false;
     const move = (ev) => {{
-      const inner = cols.getBoundingClientRect().width - 2 * handle.offsetWidth;
-      if (inner <= 0) return;
-      const dx = (ev.clientX - x0) / inner;
-      if (left) l = clamp(l0 + dx, 1 - CENTER_MIN - r);
-      else r = clamp(r0 - dx, 1 - CENTER_MIN - l);
-      apply(cols, l, r);
+      const px = p0 + (side === "l" ? ev.clientX - x0 : x0 - ev.clientX);
+      moved = true;
+      if (px < COLLAPSE) {{
+        cols.classList.add("sp-collapsed-" + side);  // the width stays at f0 to come back at
+        cols.style.setProperty("--sp-" + side, f0);
+      }} else {{
+        cols.classList.remove("sp-collapsed-" + side);
+        cols.style.setProperty("--sp-" + side, Math.max(Math.min(px, maxPx), COLLAPSE) / inner);
+      }}
     }};
     const up = () => {{
       handle.removeEventListener("pointermove", move);
@@ -275,7 +334,7 @@ SPLIT_JS = f"""<script>
       handle.removeEventListener("pointercancel", up);
       handle.classList.remove("sp-active");
       cols.classList.remove("sp-dragging");
-      if (l !== l0 || r !== r0) emitEvent("sp_split", {{l, r}});
+      if (moved) report(cols);
     }};
     handle.addEventListener("pointermove", move);
     handle.addEventListener("pointerup", up);
@@ -284,8 +343,11 @@ SPLIT_JS = f"""<script>
   document.addEventListener("dblclick", (e) => {{
     const handle = e.target.closest && e.target.closest(".sp-handle");
     if (!handle) return;
-    apply(handle.parentElement, THIRD, THIRD);
-    emitEvent("sp_split", {{l: THIRD, r: THIRD}});
+    const cols = handle.parentElement;
+    cols.classList.remove("sp-collapsed-l", "sp-collapsed-r");
+    cols.style.setProperty("--sp-l", THIRD);
+    cols.style.setProperty("--sp-r", THIRD);
+    report(cols);
   }});
 }})();
 </script>"""
@@ -304,6 +366,8 @@ class PendantPage:
         self._shown_highlight = None
         # widths of the left and right column (see SPLIT_JS): kept when the page is rebuilt after a reconnect
         self._split = [SPLIT_DEFAULT, SPLIT_DEFAULT]
+        self._collapsed = {"l": False, "r": False}  # side panel shown as its strip
+        self._translation = "pad"  # translation input of this browser (TRANSLATION_INPUTS), kept across a rebuild
         self._cols = None
         ui.add_css(CSS)
         ui.add_body_html(KEYBOARD_LOCK_JS)
@@ -323,11 +387,15 @@ class PendantPage:
             self.bar = ui.element("div").classes("wg-actionbar sp-bar")
 
         self._add_shortcuts()
+        with frame.actions:  # in the header, beside the frame's own buttons: it is about the whole page
+            ui.button(icon="sym_o_restart_alt", on_click=self._reset_layout).props("flat round").classes(
+                "wg-icon-btn"
+            ).tooltip(f"Reset the layout and the 3D view{self._keys('view')}")
         self._rebuild()
-        ui.timer(0.1, self._tick)
-        ui.timer(0.5, self._update_status)
-        ui.timer(0.5, self._sync_theme)
-        ui.timer(0.1, lambda: ui.run_javascript(BAR_JS), once=True)
+        page_timer(0.1, self._tick)
+        page_timer(0.5, self._update_status)
+        page_timer(0.5, self._sync_theme)
+        page_timer(0.1, lambda: ui.run_javascript(BAR_JS), once=True)
 
     @property
     def node(self):
@@ -350,15 +418,18 @@ class PendantPage:
                     ui.label("Reconnecting to ROS")
                     ui.label("The controls come back when the new connection is up.").classes("wg-hint")
             return
-        with self.main, ui.element("div").classes("sp-cols").style(self._split_style()) as self._cols:
+        with self.main, ui.element("div").classes("sp-cols") as self._cols:
             with ui.element("div").classes("sp-col sp-col-l"):
                 self._cartesian_panel(c)
+                self.cart_strip = self._strip("l", "Cartesian mode", TWIST)
             self._handle("l")
             with ui.element("div").classes("sp-col sp-col-c"):
                 self._robot_panel(c)
             self._handle("r")
             with ui.element("div").classes("sp-col sp-col-r"):
                 self._joints_panel(c)
+                self.joint_strip = self._strip("r", "Joint mode", JOINT)
+        self._apply_layout()
         with self.bar:
             self._action_bar(c)
         self._build_rows(c)
@@ -371,22 +442,50 @@ class PendantPage:
             ui.icon("sym_o_drag_indicator", size="20px")
             ui.tooltip("Drag to resize the panels, double-click for equal ones")
 
-    def _split_style(self):
+    def _strip(self, side, text, mode):
+        """What a side panel shows when dragged narrow: its mode, written vertically. Tap: open it, in that mode."""
+        with ui.element("button").classes("sp-strip") as strip:
+            ui.icon("sym_o_open_in_full", size="20px")
+            ui.label(text).classes("sp-strip-label")
+            ui.tooltip(f"Show the panel again and jog in {text}")
+        strip.on("click", lambda: self._expand(side, mode))
+        return strip
+
+    def _expand(self, side, mode):
+        self._collapsed[side] = False
+        self._apply_layout()
+        self.set_mode(mode)
+
+    def _apply_layout(self):
+        """Widths and strips of the columns, as Python knows them (the browser applies a drag itself first)."""
+        if self._cols is None or self._cols.is_deleted:
+            return
         left, right = self._split
-        return f"--sp-l: {left:.4f}; --sp-r: {right:.4f}"
+        self._cols.style(f"--sp-l: {left:.4f}; --sp-r: {right:.4f}")
+        for side, collapsed in self._collapsed.items():
+            if collapsed:
+                self._cols.classes(add=f"sp-collapsed-{side}")
+            else:
+                self._cols.classes(remove=f"sp-collapsed-{side}")
 
     def _on_split(self, e):
-        """A border was dragged: keep the widths (the browser has applied them already)."""
+        """A border was dragged: keep the widths and strips, so a later update of the element does not undo them."""
         try:
             left, right = float(e.args["l"]), float(e.args["r"])
+            collapsed = {"l": bool(e.args["cl"]), "r": bool(e.args["cr"])}
         except (KeyError, TypeError, ValueError):
             return
-        left = min(max(left, SPLIT_MIN), SPLIT_MAX)
-        right = min(max(right, SPLIT_MIN), SPLIT_MAX, 1 - SPLIT_CENTER_MIN - left)
-        self._split = [left, right]
-        if self._cols is not None and not self._cols.is_deleted:
-            # the same values the browser already shows, so a later update of the element does not undo the drag
-            self._cols.style(self._split_style())
+        left = min(max(left, 0.05), SPLIT_MAX)
+        right = min(max(right, 0.05), SPLIT_MAX)
+        self._split, self._collapsed = [left, right], collapsed
+        self._apply_layout()
+
+    def _reset_layout(self):
+        """Three equal panels, none a strip, and the 3D view's camera back at its start."""
+        self._split = [SPLIT_DEFAULT, SPLIT_DEFAULT]
+        self._collapsed = {"l": False, "r": False}
+        self._apply_layout()
+        self._reset_view()
 
     def _overlay(self, text, mode):
         with ui.element("div").classes("sp-overlay") as overlay:
@@ -403,18 +502,41 @@ class PendantPage:
                         {"base": "Base", "tool": "Tool"}, value=c.frame, on_change=lambda e: self._set_frame(e.value)
                     )
                     .props(TOGGLE)
-                    .tooltip(f"Frame of the commands ({self.key_labels['base']} / {self.key_labels['tool']})")
+                    .tooltip(f"Frame of the commands{self._keys('base', 'tool')}")
                 )
+            # the translation input, above everything it changes: the pad (with its plane) or one slider per axis
             with ui.element("div").classes("sp-row"):
+                ui.label("Translation").classes("wg-label")
+                self.trans_toggle = (
+                    ui.toggle(
+                        TRANSLATION_INPUTS,
+                        value=self._translation,
+                        on_change=lambda e: self._set_translation(e.value),
+                    )
+                    .props(TOGGLE)
+                    .tooltip(
+                        f"Jog X, Y and Z with the pad and rocker, or with a slider each{self._keys('translation')}"
+                    )
+                )
+            with ui.element("div").classes("sp-trans") as self.trans_pad:
+                self.pad = JogPad("xy", on_jog=lambda x, y: self._input("pad", (x, y)))
+                self.rocker = JogPad("y", on_jog=lambda x, y: self._input("rocker", y))
+            # the plane belongs to the pad, so it sits right below it (and goes with it)
+            with ui.element("div").classes("sp-row") as self.plane_row:
                 ui.label("Plane").classes("wg-label")
                 self.plane_toggle = (
                     ui.toggle(list(PLANES), value=c.plane, on_change=lambda e: self._set_plane(e.value))
                     .props(TOGGLE)
-                    .tooltip(f"Plane of the pad; the rocker drives the third axis ({self.key_labels['plane']})")
+                    .tooltip(f"Plane of the pad; the rocker drives the third axis{self._keys('plane')}")
                 )
-            with ui.element("div").classes("sp-trans"):
-                self.pad = JogPad("xy", on_jog=lambda x, y: self._input("pad", (x, y)))
-                self.rocker = JogPad("y", on_jog=lambda x, y: self._input("rocker", y))
+            with ui.element("div").classes("sp-trans-sliders") as self.trans_sliders:
+                self.trans_rows = {}
+                for key in "xyz":
+                    with ui.element("div").classes("sp-rot sp-trow") as row:
+                        ui.label(key.upper()).classes("sp-rot-label")
+                        JogSlider(on_jog=lambda v, k=key: self._input(k, v))
+                    self.trans_rows[key] = row
+            self._show_translation()
             ui.label("Rotation").classes("wg-label")
             for key in ("rx", "ry", "rz"):
                 with ui.element("div").classes("sp-rot"):
@@ -426,10 +548,6 @@ class PendantPage:
         with ui.element("section").classes("wg-panel sp-panel sp-robot"):
             with ui.element("div").classes("wg-panel-head"):
                 ui.label("Robot").classes("wg-h2")
-                self.view_hint = ui.label().classes("wg-hint sp-ellipsis")
-                ui.button(icon="sym_o_restart_alt", on_click=self._reset_view).props("flat round").classes(
-                    "wg-icon-btn"
-                ).tooltip(f"Reset the view ({self.key_labels['view']})")
             with ui.element("div").classes("sp-view"):
                 self.view = RobotView(c, self.dark, on_pick=self._on_pick)
                 with ui.element("div").classes("sp-report") as self.report:
@@ -446,7 +564,7 @@ class PendantPage:
             with ui.element("div").classes("sp-command"):
                 ui.label("Command").classes("wg-label")
                 self.command_label = ui.label().classes("wg-mono wg-hint sp-ellipsis")
-            self.loading_timer = ui.timer(0.5, self._watch_loading)
+            self.loading_timer = page_timer(0.5, self._watch_loading)
 
     def _joints_panel(self, c):
         with ui.element("section").classes("wg-panel sp-panel sp-joints"):
@@ -492,7 +610,7 @@ class PendantPage:
             .on("click", lambda: self.set_mode(self.mode_toggle.value))
             .props(TOGGLE)
             .classes("sp-mode")
-            .tooltip(f"Mode of MoveIt Servo ({self.key_labels['cartesian']} / {self.key_labels['joint']})")
+            .tooltip(f"Mode of MoveIt Servo{self._keys('cartesian', 'joint')}")
         )
         with ui.element("div").classes("sp-speed"):
             ui.label("Speed").classes("wg-label")
@@ -501,14 +619,14 @@ class PendantPage:
                 ui.slider(min=SPEED_MIN, max=100, step=SPEED_STEP, value=round(c.speed * 100), on_change=self._on_speed)
                 .props("thumb-size=36px track-size=10px")
                 .classes("flex-1")
-                .tooltip(f"Scales every command ({self.key_labels['faster']} / {self.key_labels['slower']})")
+                .tooltip(f"Scales every command{self._keys('faster', 'slower')}")
             )
         self.pause_button = (
             ui.button("Pause", icon="sym_o_pause", on_click=self.toggle_pause)
             .props("no-caps outline")
             .classes("sp-pause")
             .tooltip(
-                f"Pause Servo, or resume the mode before ({self.key_labels['pause']}). Paused, nothing is sent; "
+                f"Pause Servo, or resume the mode before{self._keys('pause')}. Paused, nothing is sent; "
                 "tapping a panel also resumes in its mode."
             )
         )
@@ -519,23 +637,45 @@ class PendantPage:
     # ------------------------------------------------------------------ actions
 
     def _add_shortcuts(self):
-        k = self.frame.shortcuts
-        self.key_labels = {
-            "cartesian": k.add("c", "Cartesian mode", lambda: self.set_mode(TWIST), group="Mode"),
-            "joint": k.add("j", "Joint mode", lambda: self.set_mode(JOINT), group="Mode"),
-            "pause": k.add("x", "Pause Servo / resume the mode before", self.toggle_pause, group="Mode"),
-            "faster": k.add("+", f"Speed +{SPEED_STEP} %", lambda: self._change_speed(SPEED_STEP), group="Speed"),
-            "slower": k.add("-", f"Speed −{SPEED_STEP} %", lambda: self._change_speed(-SPEED_STEP), group="Speed"),
-            "base": k.add("b", "Commands in the base frame", lambda: self._set_frame("base"), group="Cartesian"),
-            "tool": k.add("t", "Commands in the tool frame", lambda: self._set_frame("tool"), group="Cartesian"),
-            "plane": k.add("p", "Next plane of the pad (XY, XZ, YZ)", self._next_plane, group="Cartesian"),
-            "view": k.add("v", "Reset the 3D view", self._reset_view, group="Robot"),
+        """The actions that have a shortcut; which key does what is set in config/shortcuts.yaml (keymap.py)."""
+        actions = {  # action (the name in shortcuts.yaml): (group, description, handler)
+            "cartesian": ("Mode", "Cartesian mode", lambda: self.set_mode(TWIST)),
+            "joint": ("Mode", "Joint mode", lambda: self.set_mode(JOINT)),
+            "pause": ("Mode", "Pause Servo / resume the mode before", self.toggle_pause),
+            "faster": ("Speed", f"Speed +{SPEED_STEP} %", lambda: self._change_speed(SPEED_STEP)),
+            "slower": ("Speed", f"Speed −{SPEED_STEP} %", lambda: self._change_speed(-SPEED_STEP)),
+            "base": ("Cartesian", "Commands in the base frame", lambda: self._set_frame("base")),
+            "tool": ("Cartesian", "Commands in the tool frame", lambda: self._set_frame("tool")),
+            "plane": ("Cartesian", "Next plane of the pad (XY, XZ, YZ)", self._next_plane),
+            "translation": (
+                "Cartesian", "Translation with the pad or with X / Y / Z sliders", self._toggle_translation
+            ),
+            "view": ("Robot", "Reset the layout and the 3D view", self._reset_layout),
         }
+        keymap, problems, path = load_keymap(list(actions))
+        k = self.frame.shortcuts
+        self.key_labels = {}  # action -> label of its key ("Space", "Ctrl+S"), for the tooltips
+        for action, (group, description, handler) in actions.items():
+            key = keymap.get(action)
+            if key is not None:
+                self.key_labels[action] = k.add(key.key, description, handler, group=group, **key.options)
+        if problems:
+            logger = self.node.get_logger() if self.node is not None else log
+            for problem in problems:
+                logger.warning(f"{path}: {problem}")
+            more = f" (and {len(problems) - 1} more, see the log)" if len(problems) > 1 else ""
+            message = f"Shortcuts: {problems[0]}{more}. Edit {path}."
+            page_timer(0.5, lambda: ui.notify(message, type="warning", multi_line=True), once=True)
         # Held digit keys are handled in the browser (components/key_jog.js); listed here for the help
         jogging = "Jogging (joint mode)"
         k.add("1…9", "Jog joint 1 … 9 positive while held", lambda: None, group=jogging)
         k.add("1…9", "Jog joint 1 … 9 negative while held (Shift works too)", lambda: None, ctrl=True, group=jogging)
         k.add("escape", "Stop: release all inputs", self.stop, group=jogging)
+
+    def _keys(self, *actions):
+        """' (B / T)' for a tooltip: the keys of these actions, or '' if none of them has one."""
+        labels = [self.key_labels[a] for a in actions if a in self.key_labels]
+        return f" ({' / '.join(labels)})" if labels else ""
 
     def _input(self, key, value):
         c = self.node
@@ -589,13 +729,12 @@ class PendantPage:
         # paused: both panels dimmed, each offering its mode (which resumes Servo)
         self.cart_overlay.set_visibility(c.mode != TWIST)
         self.joint_overlay.set_visibility(c.mode != JOINT)
-        if c.paused:
-            hint = "Paused: tap a panel to jog"
-        elif c.mode == JOINT:
-            hint = "Tap a ring to find its slider"
-        else:
-            hint = "Tap an arrow to find its control"
-        self.view_hint.set_text(hint)
+        # a strip of the active mode's panel is lit, so a collapsed active panel is not lost
+        for strip, mode in ((self.cart_strip, TWIST), (self.joint_strip, JOINT)):
+            if c.mode == mode:
+                strip.classes(add="sp-strip-active")
+            else:
+                strip.classes(remove="sp-strip-active")
         if c.paused:
             self.pause_button.props(remove="outline").props("unelevated color=primary")
             self.pause_button.set_text("Paused")
@@ -641,6 +780,26 @@ class PendantPage:
             planes = list(PLANES)
             self._set_plane(planes[(planes.index(c.plane) + 1) % len(planes)])
 
+    def _set_translation(self, translation):
+        """Jog X, Y and Z with the pad and rocker, or with a slider each. Releases the translation inputs."""
+        if translation not in TRANSLATION_INPUTS or translation == self._translation:
+            return
+        self._translation = translation
+        for key in ("pad", "rocker", "x", "y", "z"):
+            self._input(key, 0.0)
+        self._show_translation()
+
+    def _toggle_translation(self):
+        self._set_translation("sliders" if self._translation == "pad" else "pad")
+
+    def _show_translation(self):
+        sliders = self._translation == "sliders"
+        self.trans_toggle.value = self._translation
+        self.trans_pad.set_visibility(not sliders)
+        self.plane_row.set_visibility(not sliders)
+        self.trans_sliders.set_visibility(sliders)
+        self._shown_highlight = None  # the picked arrow lights a slider now, or a half of the pad
+
     def _refresh_labels(self, c):
         (h, v), r = PLANES[c.plane]
         self.pad.set_labels(
@@ -674,6 +833,8 @@ class PendantPage:
             self._pressed = (key, time.monotonic() + PICK_HIGHLIGHT)
             if key.startswith("j:"):
                 target = self.joint_widgets.get(key[2:], (None,))[-1]
+            elif self._translation == "sliders":  # the axis has its own slider
+                target = self.trans_rows[key[0]]
             else:  # the rocker of the plane drives the axis alone
                 self._set_plane(ROCKER_PLANES[AXIS_NAMES.index(key[0].upper())])
                 target = self.rocker
@@ -697,16 +858,20 @@ class PendantPage:
         key = self._highlighted(c)
         if self.view is not None:
             self.view.highlight = key
-        if self._shown_highlight == (key, c.plane):
+        if self._shown_highlight == (key, c.plane, self._translation):
             return
-        self._shown_highlight = (key, c.plane)
+        self._shown_highlight = (key, c.plane, self._translation)
         for name, (*_, row) in self.joint_widgets.items():
             if key == "j:" + name:
                 row.classes(add="sp-hl")
             else:
                 row.classes(remove="sp-hl")
+        for axis, row in self.trans_rows.items():
+            row.classes(remove="sp-hl sp-hl-pos sp-hl-neg")
+            if key is not None and key[0] == axis and self._translation == "sliders":
+                row.classes(add=f"sp-hl sp-hl-{'pos' if key[1] == '+' else 'neg'}")
         pad = rocker = (None,)
-        if key is not None and not key.startswith("j:"):
+        if key is not None and not key.startswith("j:") and self._translation == "pad":
             axis, sign = AXIS_NAMES.index(key[0].upper()), 1 if key[1] == "+" else -1
             (h, v), _ = PLANES[c.plane]
             if axis == h:
@@ -809,7 +974,10 @@ class PendantPage:
         c, view = self.node, self.view
         if c is None or view is None or self.loading.is_deleted:
             return
-        if not await view.loading():
+        loading = await view.loading()
+        if self.loading.is_deleted:  # the page was closed or rebuilt while waiting for the browser
+            return
+        if not loading:
             self.loading.set_visibility(False)
             self.loading_timer.cancel()
             return
@@ -821,6 +989,8 @@ class PendantPage:
             try:
                 dark = await theme.system_is_dark()
             except TimeoutError:
+                return
+            if self.main.is_deleted:  # the page was closed while waiting for the browser
                 return
         self.dark = dark
         if self.view is not None:

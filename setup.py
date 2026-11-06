@@ -23,6 +23,7 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
+        get_data_files("config", ["*.yaml"]),  # the keyboard shortcuts (config/shortcuts.yaml)
     ],
     package_data={package_name: ["components/*.js", "shell/fonts/*"]},
     include_package_data=True,

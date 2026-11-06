@@ -15,6 +15,7 @@ from nicegui import ui
 from servo_pendant_webgui.mesh_cache import glb_url
 from servo_pendant_webgui.ros_node import AXIS_NAMES, JOINT, TWIST
 from servo_pendant_webgui.shell import theme
+from servo_pendant_webgui.timers import page_timer
 
 # Links without a material in the URDF
 LINK_COLOR = theme.LIGHT["border"]
@@ -87,9 +88,7 @@ class RobotView:
         self.scene = ui.scene(grid=False, background_color=self.colors["background"]).classes("sp-scene")
         self.scene.on("pick3d", self._handle_pick)
         self.scene.on("init", self._install_picking)  # again after a remount (e.g. a lost WebGL context)
-        ui.timer(
-            0.5, self._start, once=True
-        )  # the camera can only be moved once the scene is live
+        page_timer(0.5, self._start, once=True)  # the camera can only be moved once the scene is live
         self.model = None
         self.visual_objects = []  # (object, link, 4x4 visual origin, is_cylinder)
         self.rings = {}  # joint -> (group, [parts])

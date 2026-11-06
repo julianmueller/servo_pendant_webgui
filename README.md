@@ -6,7 +6,9 @@ Cartesian jogging left, the robot in the middle, the joints right, mode, speed a
 jog (`control_msgs/JointJog`) and twist (`geometry_msgs/TwistStamped`) commands. One screen without scrolling from
 1280×800, and it works with mouse, touch and keyboard.
 
-![Screenshot of the ui](docs/screenshot.png)
+![The pendant in Cartesian mode: the pad and rocker for translation, the rotation sliders, and the robot with its jog arrows](docs/screenshot_01.png)
+
+![The pendant in joint mode, with the Cartesian panel collapsed to its strip: the joint rings in the 3D view and the joint sliders](docs/screenshot_02.png)
 
 ## Build
 
@@ -44,8 +46,11 @@ parameters `host` and `port`; they are command line options now.
 
 The page fills the browser width. Cartesian, robot and joints start a third of the width each. Drag the handle
 (⋮⋮) in the gap between two panels to resize them: the left one moves only the border between Cartesian and robot,
-the right one only the border between robot and joints; the panel on the far side keeps its width. Double-click a
-handle for three equal panels again. The sizes are kept until the page is reloaded. Below 1100 px one column is
+the right one only the border between robot and joints; the panel on the far side keeps its width. Dragged narrower
+than 250 px, the Cartesian or joints panel becomes a strip that only says *Cartesian mode* / *Joint mode*, written
+vertically: tap it to bring the panel back at its size and switch to that mode (or drag its border out again).
+Double-click a handle for three equal panels again; the reset button in the header (<kbd>V</kbd>) also resets the 3D
+view. The sizes are kept until the page is reloaded. Below 1100 px one column is
 shown: the control of the active mode (Cartesian or joints; switch with the action bar), and the robot below it.
 
 - **Header**: the ROS connection (click: settings), Servo's state (mode accepted, rejected, paused or not available;
@@ -69,7 +74,9 @@ shown: the control of the active mode (Cartesian or joints; switch with the acti
     never jumps to speed.
 - **Cartesian (left)**:
   - **Base / Tool**: frame of the commands (`panda_link0` / `panda_link8`).
-  - **Plane XY / XZ / YZ**: the plane the large pad moves in. The rocker next to it drives the third axis.
+  - **Translation Pad / Sliders**: how X, Y and Z are jogged. *Pad*: a large 2D pad in a plane and a rocker next to
+    it for the third axis, with **Plane XY / XZ / YZ** below the pad choosing that plane. *Sliders*: one velocity
+    slider each for X, Y and Z. The choice is per browser and kept until the page is reloaded.
   - **Rotation Rx / Ry / Rz**: velocity sliders for rotation about the axes of the selected frame.
   - The pad and rocker are relative too: drag from wherever you touch.
 - **Robot (centre)**: the robot from `/robot_description` with its URDF visual meshes (converted to glTF once and
@@ -80,8 +87,9 @@ shown: the control of the active mode (Cartesian or joints; switch with the acti
   - Rings and arrows are drawn over the robot, so the ones behind it or inside the gripper stay visible.
   - Steel blue = positive, amber = negative. The arrow head of a moving joint's ring points in its direction of motion.
   - Pointing at a ring or arrow (mouse) or tapping it turns it solid and highlights the control that drives it: the
-    joint's row, or the half of the pad or rocker for that direction. Tapping an arrow also switches to the plane
-    whose rocker drives that axis alone (X: YZ, Y: XZ, Z: XY). A tapped control stays highlighted for 2.5 s. Nothing
+    joint's row, the half of the pad or rocker for that direction, or (translation with sliders) the axis' slider.
+    With the pad, tapping an arrow also switches to the plane whose rocker drives that axis alone (X: YZ, Y: XZ,
+    Z: XY). A tapped control stays highlighted for 2.5 s. Nothing
     moves from the 3D view: jogging stays on the controls.
   - A loading overlay is shown until the robot description has arrived and all meshes are loaded in the browser.
   - Below the view: the command currently sent to Servo.
@@ -113,22 +121,44 @@ Keyboard jogging is off while the settings are open.
 
 ## Keyboard shortcuts
 
-<kbd>?</kbd> lists all of them.
+<kbd>?</kbd> lists all of them. The defaults:
 
 | Key | |
 | --- | --- |
 | <kbd>1</kbd> … <kbd>9</kbd> (held, joint mode) | jog joint 1 … 9 positive; with <kbd>Ctrl</kbd> or <kbd>Shift</kbd> negative |
 | <kbd>Esc</kbd> | stop: release all inputs |
 | <kbd>C</kbd> / <kbd>J</kbd> | Cartesian / joint mode (resumes Servo when paused) |
-| <kbd>X</kbd> | pause Servo / resume the mode from before |
+| <kbd>Space</kbd> | pause Servo / resume the mode from before |
 | <kbd>+</kbd> / <kbd>-</kbd> | speed +5 % / −5 % |
 | <kbd>B</kbd> / <kbd>T</kbd> | commands in the base / tool frame |
 | <kbd>P</kbd> | next plane of the pad (XY, XZ, YZ) |
-| <kbd>V</kbd> | reset the 3D view |
+| <kbd>S</kbd> | translation with the pad or with X / Y / Z sliders |
+| <kbd>V</kbd> | reset the layout (three equal panels) and the 3D view |
 | <kbd>?</kbd> | show the shortcuts |
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> | settings |
 | <kbd>D</kbd> | light / dark theme |
 | <kbd>F</kbd> | full screen |
+
+### Changing them
+
+The keys of the actions are a table in [`config/shortcuts.yaml`](config/shortcuts.yaml), one line per action:
+
+```yaml
+pause: space          # pause Servo / resume the mode from before
+faster: "+"           # speed +5 %
+base: b               # commands in the base frame
+```
+
+Change a key, save and reload the page: the file is read whenever a page is opened (installed with
+`colcon build --symlink-install`, the installed file is a link to the one in `src`, so no rebuild is needed). Keys are
+the browser's names in lower case (`c`, `"+"`, `space`, `enter`, `arrowup`, `f2`), with modifiers in front
+(`ctrl+s`, `alt+p`, `shift+p`); quote characters such as `"+"` and `"-"`, and use `""` for no shortcut. A line that
+cannot be used (unknown action or key, a key used twice, or one of the fixed keys) is skipped, and the page and the
+log say why. Fixed, not in the table: <kbd>Esc</kbd>, <kbd>1</kbd> … <kbd>9</kbd>, and the web GUI's own
+<kbd>?</kbd>, <kbd>Ctrl</kbd>+<kbd>,</kbd>, <kbd>D</kbd> and <kbd>F</kbd>.
+
+A button clicked or tapped gives the keyboard focus back to the page, so <kbd>Space</kbd> pauses rather than pressing
+that button again.
 
 Digit keys work on the top row and the numpad. Other plain typing is swallowed, so the browser's find-as-you-type /
 quick find never opens. Some browsers reserve <kbd>Ctrl</kbd>+<kbd>1</kbd> … <kbd>8</kbd> for switching tabs: use

@@ -357,6 +357,9 @@ class ServoCommander(Node):
         linear[h_axis] = _shape(pad[0])
         linear[v_axis] = _shape(pad[1])
         linear[rocker_axis] = _shape(inputs.get("rocker", 0.0))
+        # the X / Y / Z sliders (the page's other translation input: only one of them is shown at a time)
+        for axis, key in enumerate("xyz"):
+            linear[axis] = np.clip(linear[axis] + _shape(inputs.get(key, 0.0)), -1.0, 1.0)
         angular = np.array([_shape(inputs.get(k, 0.0)) for k in ("rx", "ry", "rz")])
         return (
             linear * self.max_linear * self.speed,
